@@ -70,18 +70,18 @@ noicmp   # ICMP blocked here by policy   <- kept: ssh works
 
 ### Slide: What is iperf?
 
-iperf is the de-facto standard throughput tool: one box plays **server**, another plays **client**, and the client pushes bytes over TCP as hard as it can for a fixed time. The achieved rate is the answer — the true end-to-end capacity of that path: NICs, kernel, cables, switches, everything in between.
+iperf is the de-facto standard throughput tool: it fills the pipe between two machines and reports what actually got through — the true end-to-end capacity of that path: NICs, kernel, cables, switches, everything in between.
 
-| Concept | What it means |
+@@ iperf-pair
+
+| Knob | What it means |
 |---|---|
-| server / client | `iperf -s` waits on the server; `iperf -c <server>` connects and sends |
 | duration (`-t`) | how long the push lasts — 10 s default; longer smooths out bursts |
 | parallel streams (`-P`) | several TCP connections at once — one stream often can't fill a fat pipe |
-| full-duplex | both directions on the same connection at the same time — like real traffic |
-| TCP vs UDP | TCP measures achievable throughput; UDP sends a fixed rate to measure loss/jitter |
-| the report | bytes moved and bandwidth, per interval and in total |
+| full-duplex | both directions at the same time, on one connection — like real traffic |
+| TCP vs UDP | TCP measures achievable throughput; UDP sends a fixed rate to measure loss |
 
-Given enough CPU, iperf will saturate a 1G / 10G / 25G link — exactly what a stress test needs. But it thinks in **pairs**: it has no idea a fleet exists. That's the orchestrator's job.
+Given enough CPU, iperf saturates a 1G / 10G / 25G link. But it thinks in **pairs** — it has no idea a fleet exists. That's the orchestrator's job.
 
 **Notes:** Take a beat here for anyone who hasn't used iperf. The mental model: it answers "how fast is the pipe between A and B, really?" by filling it. Emphasize that the number includes the whole path — a slow result can be the NIC, the host's CPU, or the network, which is exactly why the orchestrator also samples CPU. The pair-at-a-time limitation is the segue to the next slide.
 
@@ -89,12 +89,16 @@ Given enough CPU, iperf will saturate a 1G / 10G / 25G link — exactly what a s
 
 ### Slide: Why iperf2 — and why an orchestrator at all
 
-- Two iperfs exist. **iperf3**'s server takes one client at a time — in a mesh, everyone else gets "server busy". At 100 hosts the workaround is 100 daemons × 100 ports per host. **iperf2** takes concurrent clients on one port, and its `--full-duplex` tests both directions on one connection. (The first version used iperf3; the architecture collapsed under its own workarounds.)
-- A mesh has quadratic moving parts — **4,950 pairs at N=100** — and making it efficient is the orchestrator's job:
-  - **Everyone starts together**: one "start at" timestamp is pushed out; every host waits for it and fires within a fraction of a second.
-  - **The work is spread fairly**: a parity rule on host positions gives every host ~half the client jobs (49–50 each at N=100, instead of one host running 99).
-  - **Results come home fast**: one archive per host instead of thousands of copies — minutes, not the ~80 minutes it once took.
-  - **CPU is sampled everywhere** during the run, because a throughput number without CPU next to it gets misread.
+- Two iperfs exist: **iperf2** serves many clients on one port; **iperf3** takes one at a time — unusable in a mesh. iperf2's `--full-duplex` also tests both directions on one connection.
+
+@@ mesh
+
+| Making the mesh efficient | How |
+|---|---|
+| Everyone starts together | one "start at" timestamp pushed to all hosts — they fire within a fraction of a second |
+| Work is spread fairly | every host runs ~half the client jobs (49–50 each at N=100, not 0–99) |
+| Results come home fast | one archive per host, not thousands of copies — minutes instead of ~80 |
+| CPU sampled everywhere | a throughput number without CPU next to it gets misread |
 
 **Notes:** Each of these was a real problem hit and fixed — the tool is the accumulated answers. Worth a warning: some distros ship "iperf" as a symlink to iperf3; the check-iperf preflight catches that (WRONG_VERSION). The parity rule detail if asked: for pair {i, j}, the client is the smaller index when i+j is even, the larger when odd — both ends compute it independently, so no coordination is needed.
 
@@ -133,11 +137,13 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 
 ### Slide: parallel — the stress test (default)
 
-- **What happens:** after a synchronized start, every host fires all of its tests at once — the entire fabric is under full bidirectional load within a second.
-- **When to use it:** accepting a new fabric, validating a change window, or any time the question is "what breaks under full load?"
-- **How:** `iperf-orchestrator --servers servers.txt all` — parallel is the default.
-- **Time:** about one test-duration regardless of fleet size (~50 s at N=100).
-- **Reading the results:** every pair shares the fabric, so numbers *below* line rate everywhere are normal — what matters is the outliers: dark rows/columns on the heatmap, and hosts whose CPU pegged. This mode finds congestion, oversubscription and weak links; it does **not** give you any single pair's clean maximum.
+| | |
+|---|---|
+| What happens | after a synchronized start, every host fires all of its tests at once — the whole fabric is under full bidirectional load within a second |
+| When to use it | accepting a new fabric, validating a change window — "what breaks under full load?" |
+| How | `iperf-orchestrator --servers servers.txt all` |
+| Wall-clock | ~1 test duration, at any fleet size (~50 s at N=100) |
+| Reading the results | numbers below line rate are *normal* — every pair is sharing. Look for outliers: dark rows/columns, and hosts whose CPU pegged. Finds congestion and weak links; not any single pair's clean maximum |
 
 **Notes:** This is the mode the tool was built for and the one to demo. Set expectations about the numbers: under full contention a 10G host talking to 49 peers won't show 10G to each — you're reading the *distribution* and its outliers, not absolute line rate. If something looks bad here, the next two modes are how you isolate it.
 
@@ -145,11 +151,13 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 
 ### Slide: sequential-host — one server at a time
 
-- **What happens:** each host in turn runs all of its tests in parallel while every other host stays quiet.
-- **When to use it:** "what is this *server* capable of?" — clean per-host numbers with no neighbors interfering; the natural follow-up for a host that looked bad under `parallel`.
-- **How:** `iperf-orchestrator --servers servers.txt all sequential-host`
-- **Time:** ~N × duration (~17 min at N=100).
-- **Reading the results:** with the fabric to itself, each host should approach line rate. One that is still slow has a *local* problem — NIC, driver, CPU — not congestion. Compare against the parallel run: fine alone but bad in parallel = contention; bad in both = the host itself.
+| | |
+|---|---|
+| What happens | each host in turn runs all of its tests while every other host stays quiet |
+| When to use it | "what is this *server* capable of?" — the follow-up for a host that looked bad under parallel |
+| How | `iperf-orchestrator --servers servers.txt all sequential-host` |
+| Wall-clock | ~N × duration (~17 min at N=100) |
+| Reading the results | with the fabric to itself, each host should approach line rate. Still slow = a *local* problem (NIC, driver, CPU). Fine alone but bad in parallel = contention; bad in both = the host |
 
 **Notes:** The parallel/sequential-host comparison is the diagnostic one-two punch: the first finds the suspect, the second tells you whether it's the host or the fabric. This is also the mode for baselining what "good" looks like per host class before a stress run.
 
@@ -157,11 +165,13 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 
 ### Slide: sequential-pair — the microscope
 
-- **What happens:** exactly one connection on the wire at any moment, pair after pair.
-- **When to use it:** confirming a single suspect pair with the cleanest number possible — almost never for a whole fleet.
-- **How:** `iperf-orchestrator --servers suspects.txt all sequential-pair` — put just the suspect hosts in the list.
-- **Time:** N(N−1)/2 × duration. At N=100 that's ~14 hours; at N=4 it's a minute. Priced accordingly.
-- **Reading the results:** as clean as pair numbers get — nothing else was running. If a pair is still slow here, the *path itself* is the problem: hand it to `netmesh paths` to find the hop.
+| | |
+|---|---|
+| What happens | exactly one connection on the wire at any moment, pair after pair |
+| When to use it | confirming a single suspect pair with the cleanest number possible — almost never a whole fleet |
+| How | `iperf-orchestrator --servers suspects.txt all sequential-pair` — list only the suspects |
+| Wall-clock | N(N−1)/2 × duration: ~14 h at N=100, a minute at N=4 |
+| Reading the results | as clean as pair numbers get. Still slow here = the *path itself* — hand it to `netmesh paths` to find the hop |
 
 **Notes:** The trap to warn about: running sequential-pair across a big fleet because it's "the accurate one". It is — and it's quadratic. The right use is surgical: three or four hosts you already suspect, cleanest numbers in minutes, then escalate to path-level tools if it's still slow.
 
@@ -169,11 +179,13 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 
 ### Slide: rolling — fleets too big to mesh
 
-- **What happens:** no grand schedule. Each host just keeps a couple of short tests running — always against its *least-tested* peer — for as long as you budget.
-- **When to use it:** very large fleets, where even the parallel mesh's setup and load become the problem; long soak tests.
-- **How:** `iperf-orchestrator --servers servers.txt --total-time 1800 --flows 2 all rolling`
-- **Time:** exactly the budget you give it. Per-host load stays constant no matter how big the fleet is.
-- **Reading the results:** a survey, not a snapshot — coverage evens out over time because every host picks its least-tested peer. Read the percentiles and the slowest pairs; give it enough time that every pair has been visited a few times.
+| | |
+|---|---|
+| What happens | no grand schedule — each host keeps a couple of short tests running against its *least-tested* peer, for as long as you budget |
+| When to use it | very large fleets, where even the parallel mesh becomes the problem; long soak tests |
+| How | `iperf-orchestrator --total-time 1800 --flows 2 all rolling` |
+| Wall-clock | exactly the budget you give it; per-host load is constant at any fleet size |
+| Reading the results | a survey, not a snapshot — coverage evens out over time. Read percentiles and slowest pairs; give every pair a few visits |
 
 **Notes:** The contrast to land: parallel is one synchronized photograph of the fleet under maximum load; rolling is a long exposure at gentle, constant load. At 1,000 hosts a full mesh is half a million pairs — rolling is the only shape that stays sane there, and its per-host load being independent of fleet size is the property that makes it safe.
 
@@ -218,8 +230,8 @@ iperf-orchestrator --run-id <id> make-heatmap        # re-render an old run
 iperf-orchestrator --servers servers.txt cleanup --yes   # tidy the servers
 ```
 
-- Open the heatmap first: **rows = sending, columns = receiving.** A red row is a host with bad outbound; a red column, bad inbound.
-- Before blaming the network, open `cpu_summary.csv` — a pegged host makes its own links look slow.
+@@ heatmap
+
 - Every run is a timestamped folder: keep them, and diff results across change windows.
 
 **Notes:** The habits to leave the audience with: heatmap → CPU → summary, in that order; bump --duration and -P when a single 10-second stream can't fill the pipe (common on 25G+); and treat run folders as records — the before/after diff across a change window is often the most valuable artifact the tool produces.
@@ -232,11 +244,10 @@ iperf-orchestrator --servers servers.txt cleanup --yes   # tidy the servers
 
 ### Slide: The question iperf can't answer
 
-- iperf just told us how many **bytes** per second the fabric can move. But most real traffic isn't bulk bytes — it's *conversations*: a small request goes out, an answer comes back. RPCs, storage reads, control planes.
-- That traffic stresses a network in **packets per second**, not bits per second — and pps is where fabrics and NICs actually fall over.
-- `mx` runs exactly that shape: every host sends small requests at a steady rate to every other host, and **every request gets a reply**.
-- Bonus: the reply carries the request's own timestamp back, so you get true **round-trip latency for free** — no clock synchronization anywhere.
-- A realistic example: `--tx-size 128 --rx-size 8192` is an RPC — the same packet rate in both directions, but 64× the bytes on the reply path. That asymmetry is usually what breaks first.
+- iperf measured **bytes** per second. But most real traffic is *conversations* — RPCs, storage reads, control planes: a small request out, an answer back — and that stresses a network in **packets per second**, which is where fabrics and NICs actually fall over.
+- `mx` runs exactly that shape between every pair of hosts, at a rate you choose — and the asymmetry it creates (tiny requests, fat replies) is usually what breaks first.
+
+@@ reqreply
 
 **Notes:** Land the contrast with a picture in words: a fabric can move 100 gigabits of bulk TCP happily and still collapse at two million answered packets per second — and your database traffic looks like the second thing, not the first. If asked why UDP: TCP would quietly merge small packets together, so a "packets per second" number over TCP would be fiction. The two tools are two halves of the load story: iperf_orchestrator for bytes, mx for packets.
 
@@ -407,11 +418,15 @@ mx clean                             # done -- delete every trace, verified
 
 ### Slide: Why not just ping?
 
-- netmesh probes with **small UDP packets between two tiny agents** it places on your hosts — and that buys four things ping can't do:
-- **No root, anywhere.** Ordinary sockets, ordinary user.
-- **Exact latency.** The sender's own clock stamp comes back in the echo — one clock, so the round trip is exact, no time-sync assumptions.
-- **Loss with a direction.** The far end counts what actually arrived — so loss splits into *on the way there* vs *on the way back*. A sick sender and a sick receiver are different findings.
-- **The real path.** Routers answer ping with their slow management CPU, which gets rate-limited and deprioritized — ping systematically lies about what your application traffic sees. UDP probes travel the same path your traffic does.
+- netmesh probes with **small UDP packets between two tiny agents** it places on your hosts — which buys four things ping can't do:
+
+| | ping | netmesh |
+|---|---|---|
+| Privileges | often needs root / special settings | none — ordinary sockets, ordinary user |
+| Latency | approximate | exact — the sender's own clock stamp comes back in the echo |
+| Loss | one number, no direction | split: *on the way there* vs *on the way back* |
+| Path measured | the router's management CPU — rate-limited, it lies | the same path your application traffic takes |
+
 - One-way delay is deliberately **not** reported: without synchronized clocks it would be a made-up number, and this tool doesn't report those.
 
 **Notes:** For endpoints you can't put an agent on — a VIP, a router, an appliance — prefix the host with ~ and it falls back to ping, but those rows are clearly quarantined in the report as one-sided, because they carry less truth. The theme continues: every number quoted is one that is actually true.
@@ -420,11 +435,14 @@ mx clean                             # done -- delete every trace, verified
 
 ### Slide: Reading the report
 
-- **The headline** — the median pair's latency, so one sick pair can neither drag the fleet number nor hide inside it. Worst pairs listed underneath.
-- **Asymmetry** — A→B slow but B→A fine? Look at A's *sending* side: the return trip just proved the rest of the path is healthy.
-- **MTU black hole** — small packets pass, big ones silently vanish: the classic "small requests work, large transfers hang" bug. Found without root.
-- **Path spread** — with `--flows`, one traffic stream 29× slower than its siblings = a sick member inside a LAG/ECMP bundle. The fault that "never reproduces", pinned.
-- **Under load** — run it around a load test and it shows what the load *did* to latency: p99 210 µs idle → 42 ms loaded is what everyone else on that path paid.
+| Finding | How to read it |
+|---|---|
+| Headline | the *median* pair's latency — one sick pair can't drag it or hide in it; worst pairs listed below |
+| Asymmetry | A→B slow, B→A fine → look at A's *sending* side: the return trip proved the rest of the path |
+| MTU black hole | small packets pass, big ones silently vanish — "small requests work, large transfers hang" |
+| Path spread | one stream 29× slower than its siblings = a sick member inside a LAG/ECMP bundle |
+| Under load | what the load *did* to latency: p99 210 µs idle → 42 ms loaded is what everyone else paid |
+
 - And a clean run says so in plain words: **"the network is not your problem."**
 
 **Notes:** Every diagnosis is computed from the data, not canned: slow pairs sharing a source point at that host's egress; sharing a destination, its ingress; crossing a rack boundary, the path between. The under-load section is the bridge back to the other two tools — wrap netmesh around an iperf or mx run and the latency cost of the throughput number appears in the same report.
