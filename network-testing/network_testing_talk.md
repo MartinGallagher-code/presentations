@@ -1,74 +1,57 @@
 # Network Testing at Fleet Scale
-### iperf_orchestrator · matrix_orchestrator (mx) · netmesh — with binnacle's `reachable` keeping the list honest
+### iperf_orchestrator · matrix_orchestrator · netmesh
 
 Slides are separated by `---`. Each slide has bullet content plus **Notes:** (what to say).
 
 ---
 
-## Part 0 — Overview
+### Slide: Three questions, three tools
+
+Testing a fleet's network really means answering three different questions — each tool here answers one of them.
+
+| Tool | The question it answers | Network state | Cost to run |
+|---|---|---|---|
+| netmesh | Is the network healthy, and which link is sick? — RTT, jitter, loss, path MTU | **Idle** — the baseline | ~10 small pkts/s per pair; safe on production |
+| iperf_orchestrator | How much TCP bandwidth can every link carry, all at once? | **Fully loaded** | Line-rate flood — schedule a window |
+| matrix_orchestrator (mx) | How many packets/sec can the fleet exchange, when every packet is answered? | **Loaded at the rate you choose** | Tunable, gentle → torture |
+
+They're one family: the same servers.txt, the same ssh-only model, and grids that read the same way. And they measure different layers of the same fabric — a 9.4 Gbit/s result over a 300 µs path and one over a 42 ms path are *different results*.
+
+**Notes:** The frame for the whole talk. Bandwidth, packet rate and latency fail independently, so no single tool can tell you the network is fine. netmesh is cheap enough to run during an incident; iperf_orchestrator is the scheduled stress test; mx is the request/response rate test that looks like real RPC and storage traffic. Because they share one host-list grammar and one deployment model, learning one means you know how to drive all three.
 
 ---
 
-### Slide: Network testing with these tools
+### Slide: Why these tools — and how they fit together
 
-- Three questions about a fleet's network, three tools:
-  - **netmesh** (binnacle) — *what does the network do when idle?* RTT, jitter, loss, path MTU.
-  - **iperf_orchestrator** — *how much TCP bandwidth under load?* Full-mesh iperf2 throughput sweep.
-  - **matrix_orchestrator (`mx`)** — *how many packets per second, when every packet must be answered?* Request/response UDP matrix.
-- One family: same `servers.txt` grammar, same ssh-only model, N×N grid outputs that read the same way.
-- Plus **`reachable`** (binnacle): prunes dead entries from the server list so the run survives the servers that are down.
+- **They go anywhere you can ssh.** No agents, no daemons, no root — nothing installed on the servers, and `clean` removes every trace afterwards.
+- **The numbers are honest.** Blank never means zero, and the headline is what the *receiver* counted — not what the sender hoped. When a tool becomes its own bottleneck, it says so.
+- **They're one file each.** Stdlib-only Python — `pip install` it, or just scp the file and run it.
+- **They compose** — meaning each one's output is the next one's input. `reachable` rewrites the very servers.txt the others read; netmesh and mx write matching N×N grids that open side by side in one spreadsheet. You chain them; there's no glue to write.
 
-**Notes:** Frame the talk: "is the network the problem?" answered at fleet scale over plain ssh. The three tools measure different layers of the same fabric; reachable is the hygiene step that makes any of them reliable on a real, decaying host list.
+=> reachable prod.txt -i | prune the list -> netmesh check | idle baseline -> iperf-orchestrator all | TCP under load -> mx run | pps under load -> netmesh --baseline | latency under load
 
----
+Commissioning a new fabric? Run them left to right — each answer tells you whether the next number will make sense.
 
-### Slide: Why these tools
-
-- **No agents, no daemons, no root** — plain Python/bash + ssh; nothing installed on servers.
-- **Leave no trace** — one remote directory; `clean` verifies it's actually gone before claiming success.
-- **Honest numbers** — blank means "not measured", never zero; DELIVERED (receiver-counted) outranks what was sent; causes outrank symptoms.
-- **One self-contained file each** — scp-able, stdlib-only; run from a checkout or `pip install`.
-- **Built for fleets** — capped parallel ssh fan-out, balanced load assignment, batched collection; patterns proven at N=100+.
-- **They compose** — shared list grammar; prune with `reachable`, baseline with `netmesh`, then load.
-
-**Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. The design rules (droppable onto any prod host, honest accounting, composability) run through all of them.
+**Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. Spell out "they compose" plainly: one server list drives everything, and the outputs are designed to sit next to each other — pruning the list, baselining, then loading is a chain of commands, not three integrations. The pipeline on the slide is the whole talk in one line; the three big sections that follow just walk it left to right.
 
 ---
 
-### Slide: The differences — what each is measuring
+### Slide: reachable — the run survives dead servers
 
-| Tool | Traffic | Headline number | Network state | Footprint |
-|---|---|---|---|---|
-| netmesh | UDP echo probes (agents both ends) | RTT p50/p99, jitter, loss split by leg, path MTU | **Idle** — the baseline | ~10 pkts/s/pair; safe during incidents |
-| iperf_orchestrator | TCP full-duplex (iperf2) | Mbps per direction per pair, + peak CPU | **Saturated** | Line-rate flood; schedule a window |
-| matrix_orchestrator | UDP request/response, paced | pps + Gbps wire, loss split, true RTT | **Loaded at the rate you choose** | Tunable, gentle → torture |
+- Server lists rot — and a fan-out that silently skips eleven dead hosts looks exactly like one that ran everywhere.
+- `reachable prod.txt -i` pings and ssh's every entry and comments out the failures, with the reason and date. When a host comes back, the next run uncomments it — and your own comments are never touched, so it's safe on cron.
+- **ssh is the gate, ping is the explanation**: a host that answers ssh is kept even when ICMP is blocked.
 
-**Notes:** Different layers fail independently: a fabric can carry 100 Gbit of bulk TCP and still collapse at 2 Mpps of answered packets. A 9.4 Gbit/s result at 300 µs idle RTT and one at 42 ms are *different results* — you need more than one of these numbers to know which you have.
+```
+web01
+# db07   #[unreachable] pings but ssh does not answer - 2026-08-15
+# ghost  #[unreachable] name does not resolve - 2026-08-15
+noicmp   # ICMP blocked here by policy   <- kept: ssh works
+```
 
----
+- Belt and braces: the orchestrators also fail open (`--keep-going`), so one dead box never aborts a 100-host run.
 
-### Slide: When to use which
-
-- **reachable** — before *any* fan-out, every time: prune the list so the run measures the fleet, not the list.
-- **netmesh** — "is it the network at all, and which link?" Incidents, new fabrics, before blaming anything. Prod-safe.
-- **iperf_orchestrator** — fabric acceptance & stress: "will it carry line rate? what breaks under full load?"
-- **mx** — RPC-shaped capacity: "how many answered packets/sec?" Small packets at rate is where fabrics and NICs actually fall over.
-- Commissioning a new fabric, run them in order: `reachable → netmesh → iperf_orchestrator → mx → netmesh under load`.
-
-**Notes:** Each tool's output tells you whether the next one's numbers make sense.
-
----
-
-### Slide: `reachable` — the run that survives dead servers
-
-- Server lists rot: decommissioned, renamed, rebuilt without your key. A fan-out that silently skips 11 of 200 hosts looks identical to one that had nothing to say about them.
-- `reachable prod.txt -i` pings + ssh's every entry and **comments out failures with the reason and date**; every other tool still reads the file.
-- **ssh is the gate, ping is the explanation** — a host answering ssh is kept even with ICMP blocked. Outcomes distinguished: `auth` / `refused` / `dns` / `no-route` / `timeout` / `down`.
-- Re-runs **uncomment hosts that come back** — the list converges instead of decaying; your own comments are never touched; safe on cron (exit 0/1/2).
-- Ranges (`node[01-24]`) expand; a mixed range is split so failures comment out individually.
-- Belt and braces: the orchestrators also **fail open** — per-host failures are tracked and reported, and iperf_orchestrator's `--keep-going` finishes the fleet past a bad host.
-
-**Notes:** This is the resilience story: prune first, and the tools tolerate whatever died since. `reachable prod.txt -i` before every big run.
+**Notes:** This answers "can the test still run when several servers are down?" — twice over. First, prune: reachable keeps the list true, distinguishes a key problem from a dead box (auth / refused / dns / no-route / timeout / down), and converges instead of decaying. Second, the tools themselves tolerate failures mid-run: per-host failures are reported and skipped, not fatal. reachable prod.txt -i before every big run is the habit to sell.
 
 ---
 

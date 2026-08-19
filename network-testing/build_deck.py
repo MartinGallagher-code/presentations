@@ -9,6 +9,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.enum.shapes import MSO_SHAPE
 
 MD = 'network_testing_talk.md'
 OUT = 'network_testing.pptx'
@@ -80,6 +81,12 @@ for chunk in raw:
                 table_rows.append(cells)
             i += 1
             continue
+        if l.strip().startswith('=> '):
+            flush_table()
+            items = [clean(seg) for seg in l.strip()[3:].split(' -> ')]
+            blocks.append(('flow', items))
+            i += 1
+            continue
         flush_table()
         m = re.match(r'^(\s*)- (.*)$', l)
         if m:
@@ -107,7 +114,25 @@ for sl in slides:
     if sl['kind'] == 'title':
         s = prs.slides.add_slide(prs.slide_layouts[L_TITLE])
         s.shapes.title.text = sl['title']
-        s.placeholders[1].text = sl['sub'] + '\nMartin Gallagher'
+        tp = s.shapes.title.text_frame.paragraphs[0]
+        tp.font.size = Pt(44)
+        tp.font.bold = True
+        tp.font.color.rgb = INK
+        stf = s.placeholders[1].text_frame
+        p1 = stf.paragraphs[0]
+        p1.text = sl['sub']
+        p1.font.size = Pt(20)
+        p1.font.color.rgb = ACCENT
+        p2 = stf.add_paragraph()
+        p2.text = 'with binnacle\u2019s reachable keeping the server list honest'
+        p2.font.size = Pt(15)
+        p2.font.italic = True
+        p3 = stf.add_paragraph()
+        p3.text = ''
+        p4 = stf.add_paragraph()
+        p4.text = 'Martin Gallagher'
+        p4.font.size = Pt(14)
+        p4.font.bold = True
         set_notes(s, sl['notes'])
         continue
     if sl['kind'] == 'section':
@@ -118,7 +143,8 @@ for sl in slides:
 
     has_table = any(b[0] == 'table' for b in sl['blocks'])
     has_code = any(b[0] == 'code' for b in sl['blocks'])
-    layout = L_TITLE_ONLY if (has_table or has_code) else L_CONTENT
+    has_flow = any(b[0] == 'flow' for b in sl['blocks'])
+    layout = L_TITLE_ONLY if (has_table or has_code or has_flow) else L_CONTENT
     s = prs.slides.add_slide(prs.slide_layouts[layout])
     s.shapes.title.text = sl['title']
     t = s.shapes.title.text_frame.paragraphs[0]
@@ -176,6 +202,45 @@ for sl in slides:
                         p.font.size = Pt(12 if ri else 12.5)
                         p.font.bold = (ri == 0)
             y = y + h + Inches(0.2)
+        elif b[0] == 'flow':
+            items = b[1]
+            n = len(items)
+            gap = 0.42
+            bw = (12.0 - gap * (n - 1)) / n
+            bh = Inches(1.0)
+            colors = [RGBColor(0x3D, 0x8B, 0x4F), RGBColor(0x12, 0x89, 0x7B),
+                      RGBColor(0xD9, 0x7C, 0x1F), RGBColor(0xBE, 0x3B, 0x4E),
+                      RGBColor(0x12, 0x89, 0x7B), RGBColor(0x3E, 0x5C, 0x76)]
+            for k, item in enumerate(items):
+                parts = item.split('|')
+                cmd = parts[0].strip()
+                cap = parts[1].strip() if len(parts) > 1 else ''
+                x = Inches(0.7 + k * (bw + gap))
+                box = s.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, x, y, Inches(bw), bh)
+                box.fill.solid()
+                box.fill.fore_color.rgb = colors[k % len(colors)]
+                box.line.fill.background()
+                btf = box.text_frame
+                btf.word_wrap = True
+                bp = btf.paragraphs[0]
+                bp.text = cmd
+                bp.font.size = Pt(11.5)
+                bp.font.bold = True
+                bp.font.name = 'Consolas'
+                bp.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+                if cap:
+                    cp = btf.add_paragraph()
+                    cp.text = cap
+                    cp.font.size = Pt(10)
+                    cp.font.color.rgb = RGBColor(0xF0, 0xF3, 0xF6)
+                if k < n - 1:
+                    ar = s.shapes.add_textbox(Inches(0.7 + (k + 1) * bw + k * gap), y + Inches(0.28), Inches(gap), Inches(0.4))
+                    ap = ar.text_frame.paragraphs[0]
+                    ap.text = '\u2192'
+                    ap.font.size = Pt(16)
+                    ap.font.bold = True
+                    ap.font.color.rgb = ACCENT
+            y = y + bh + Inches(0.22)
         elif b[0] in ('bullet', 'para'):
             txt = b[2] if b[0] == 'bullet' else b[1]
             lvl = b[1] if b[0] == 'bullet' else 0
