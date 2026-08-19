@@ -93,7 +93,8 @@ for chunk in open(MD).read().split('\n---\n'):
         slides.append(dict(kind='title', title=clean(first[2:]), sub=sub, blocks=[], notes=''))
         continue
     if first.startswith('## '):
-        slides.append(dict(kind='section', title=clean(first[3:]), blocks=[], notes=''))
+        sub = ' '.join(clean(l) for l in lines[lines.index(first) + 1:] if l.strip())
+        slides.append(dict(kind='section', title=clean(first[3:]), sub=sub, blocks=[], notes=''))
         continue
     if not first.startswith('### Slide:'):
         continue
@@ -131,6 +132,22 @@ for chunk in open(MD).read().split('\n---\n'):
         elif l.strip().startswith('@@ '):
             flush_table()
             blocks.append(('diagram', l.strip()[3:].strip()))
+        elif l.strip().startswith(':: '):
+            flush_table()
+            t, _, b = l.strip()[3:].partition(' | ')
+            if blocks and blocks[-1][0] == 'cards':
+                blocks[-1][1].append((t.strip(), b.strip()))
+            else:
+                blocks.append(('cards', [(t.strip(), b.strip())]))
+        elif l.strip().startswith(':+ ') or l.strip().startswith(':- '):
+            flush_table()
+            side = 0 if l.strip().startswith(':+') else 1
+            if blocks and blocks[-1][0] == 'panels':
+                blocks[-1][1][side].append(l.strip()[3:])
+            else:
+                pn = ([], [])
+                pn[side].append(l.strip()[3:])
+                blocks.append(('panels', pn))
         else:
             flush_table()
             m = re.match(r'^(\s*)- (.*)$', l)
@@ -220,7 +237,8 @@ def draw_bullet_group(s, group, x, y, w, accent):
     for b in group:
         p = tf.paragraphs[0] if firstp else tf.add_paragraph()
         firstp = False
-        p.space_after = Pt(7)
+        p.space_after = Pt(8)
+        p.line_spacing = 1.12
         if b[0] == 'bullet':
             lvl = b[1]
             mk = p.add_run(); mk.text = ('▪  ' if lvl == 0 else '–  ')
@@ -253,6 +271,18 @@ def col_widths(rows, total):
     wsum = sum(a ** 0.6 for a in avg)
     return [max(1.0, total * (a ** 0.6) / wsum) for a in avg]
 
+def cell_borders(cell):
+    tcPr = cell._tc.get_or_add_tcPr()
+    for i, tag in enumerate(('a:lnL', 'a:lnR', 'a:lnT', 'a:lnB')):
+        old = tcPr.find(qn(tag))
+        if old is not None:
+            tcPr.remove(old)
+        ln = etree.Element(qn(tag))
+        ln.set('w', '9525'); ln.set('cap', 'flat')
+        fill = etree.SubElement(ln, qn('a:solidFill'))
+        clr = etree.SubElement(fill, qn('a:srgbClr')); clr.set('val', 'DCE4EC')
+        tcPr.insert(i, ln)
+
 def draw_table(s, rows, x, y, w, accent):
     nrow, ncol = len(rows), len(rows[0])
     widths = col_widths(rows, w)
@@ -264,7 +294,7 @@ def draw_table(s, rows, x, y, w, accent):
         for ci in range(ncol):
             cell = row[ci] if ci < len(row) else ''
             ml = max(ml, est_lines(cell, widths[ci] - 0.2, size))
-        hh[ri] = 0.16 + ml * (size * 1.3 / 72.0)
+        hh[ri] = 0.20 + ml * (size * 1.32 / 72.0)
     gfx = s.shapes.add_table(nrow, ncol, Inches(x), Inches(y), Inches(w), Inches(sum(hh)))
     tbl = gfx.table
     tbl.first_row = False
@@ -275,8 +305,9 @@ def draw_table(s, rows, x, y, w, accent):
         tbl.rows[ri].height = Inches(hh[ri])
         for ci in range(ncol):
             cell = tbl.cell(ri, ci)
-            cell.margin_left = cell.margin_right = Inches(0.10)
-            cell.margin_top = cell.margin_bottom = Inches(0.05)
+            cell.margin_left = cell.margin_right = Inches(0.12)
+            cell.margin_top = cell.margin_bottom = Inches(0.06)
+            cell_borders(cell)
             cell.vertical_anchor = MSO_ANCHOR.MIDDLE
             cell.fill.solid()
             if ri == 0:
@@ -298,6 +329,54 @@ def draw_table(s, rows, x, y, w, accent):
                 else:
                     rich(p, text, 12, INK, mono_color=accent)
     return sum(hh) + 0.18
+
+def draw_cards(s, items, x, y, w, accent):
+    ncol = 2 if len(items) > 2 else len(items)
+    gap = 0.28
+    cw_ = (w - gap * (ncol - 1)) / ncol
+    import math as _m
+    nrow = _m.ceil(len(items) / ncol)
+    heights = []
+    for (t, b) in items:
+        heights.append(0.62 + est_lines(b, cw_ - 0.75, 11.5) * 0.20)
+    rowh = [max(heights[r * ncol:(r + 1) * ncol]) for r in range(nrow)]
+    for k, (t, b) in enumerate(items):
+        r_, c_ = divmod(k, ncol)
+        cx = x + c_ * (cw_ + gap)
+        cy = y + sum(rowh[:r_]) + 0.18 * r_
+        box(s, cx, cy, cw_, rowh[r_], FAINT)
+        dot = s.shapes.add_shape(MSO_SHAPE.OVAL, Inches(cx + 0.22), Inches(cy + 0.22), Inches(0.16), Inches(0.16))
+        dot.fill.solid(); dot.fill.fore_color.rgb = accent
+        dot.line.fill.background(); dot.shadow.inherit = False
+        tf = txt(s, cx + 0.52, cy + 0.14, cw_ - 0.75, rowh[r_] - 0.25)
+        autofit_shrink(tf)
+        p = tf.paragraphs[0]; p.space_after = Pt(3)
+        rich(p, t, 13, INK, bold=True, mono_color=accent)
+        p2 = tf.add_paragraph(); p2.line_spacing = 1.1
+        rich(p2, b, 11.5, MUTED, mono_color=accent)
+    return sum(rowh) + 0.18 * (nrow - 1) + 0.2
+
+def draw_panels(s, pn, x, y, w, accent):
+    plus, minus = pn
+    gap = 0.3
+    pw = (w - gap) / 2
+    def panel(items, px, head, hc, bg):
+        hh = 0.55 + sum(est_lines(t, pw - 0.6, 11.5) * 0.20 + 0.11 for t in items) + 0.18
+        box(s, px, y, pw, hh, bg)
+        tf = txt(s, px + 0.3, y + 0.18, pw - 0.6, hh - 0.35)
+        autofit_shrink(tf)
+        p = tf.paragraphs[0]; p.space_after = Pt(7)
+        r = p.add_run(); r.text = head
+        r.font.size = Pt(14); r.font.bold = True; r.font.color.rgb = hc; r.font.name = F
+        for t in items:
+            pp = tf.add_paragraph(); pp.space_after = Pt(6); pp.line_spacing = 1.1
+            mk = pp.add_run(); mk.text = ('✓  ' if hc == GREEN else '✗  ')
+            mk.font.color.rgb = hc; mk.font.size = Pt(11.5); mk.font.bold = True; mk.font.name = F
+            rich(pp, t, 11.5, INK, mono_color=accent)
+        return hh
+    h1 = panel(plus, x, 'It does', GREEN, RGBColor(0xEE, 0xF6, 0xEF))
+    h2 = panel(minus, x + pw + gap, 'It doesn\u2019t', CRIM, RGBColor(0xFB, 0xF0, 0xF1))
+    return max(h1, h2) + 0.2
 
 def draw_flow(s, items, x, y, w, accent):
     n = len(items)
@@ -327,12 +406,14 @@ def draw_flow(s, items, x, y, w, accent):
     return bh + 0.22
 
 # ---- illustrations --------------------------------------------------------
-def label(s, x, y, w, text, size, color, align=PP_ALIGN.CENTER, bold=False, mono=False):
+def label(s, x, y, w, text, size, color, align=PP_ALIGN.CENTER, bold=False, mono=False, spaced=False):
     tf = txt(s, x, y, w, 0.4)
     p = tf.paragraphs[0]; p.alignment = align
     r = p.add_run(); r.text = text
     r.font.size = Pt(size); r.font.color.rgb = color; r.font.bold = bold
     r.font.name = FM if mono else F
+    if spaced:
+        r._r.get_or_add_rPr().set('spc', '260')
 
 def node_box(s, x, y, w, h, title, sub, fill):
     b = box(s, x, y, w, h, fill)
@@ -425,8 +506,71 @@ def diag_heatmap(s, y, accent):
     rich(p3, 'Check `cpu_summary.csv` before blaming the network — a pegged host makes its own links look slow.', 12.5, INK, mono_color=accent)
     return gw + 0.55
 
+def diag_tool_cards(s, y, accent):
+    cards = [
+        ('netmesh', TEAL, 'What is the network like when idle?',
+         ['RTT · jitter · loss · path MTU', '~10 small packets/s per pair', 'safe on production, mid-incident']),
+        ('iperf_orchestrator', AMBER, 'How much TCP bandwidth, all at once?',
+         ['full-mesh iperf2 sweep', 'every link, both directions', 'CSV · pivot · heatmap · CPU']),
+        ('matrix_orchestrator', CRIM, 'How many packets/sec, every one answered?',
+         ['request/response matrix', 'loss split by direction', 'true round-trip latency, free']),
+    ]
+    gap = 0.3
+    cw_ = (CW - 2 * gap) / 3
+    ch = 3.45
+    for k, (name, c, q, pts) in enumerate(cards):
+        cx = MARG + k * (cw_ + gap)
+        box(s, cx, y, cw_, ch, FAINT)
+        bar = box(s, cx + 0.3, y + 0.32, 0.5, 0.09, c)
+        tf = txt(s, cx + 0.3, y + 0.55, cw_ - 0.6, ch - 0.75)
+        p = tf.paragraphs[0]; p.space_after = Pt(6)
+        r = p.add_run(); r.text = name
+        r.font.name = FM; r.font.size = Pt(13.5); r.font.bold = True; r.font.color.rgb = c
+        p2 = tf.add_paragraph(); p2.space_after = Pt(9); p2.line_spacing = 1.1
+        r2 = p2.add_run(); r2.text = q
+        r2.font.size = Pt(14); r2.font.bold = True; r2.font.color.rgb = INK; r2.font.name = F
+        for pt in pts:
+            pp = tf.add_paragraph(); pp.space_after = Pt(5)
+            mk = pp.add_run(); mk.text = '▪  '
+            mk.font.color.rgb = c; mk.font.size = Pt(11)
+            rr = pp.add_run(); rr.text = pt
+            rr.font.size = Pt(11.5); rr.font.color.rgb = MUTED; rr.font.name = F
+    return ch + 0.22
+
+def diag_agenda(s, y, accent):
+    rows = [
+        ('1', SLATE, 'The toolkit', 'three questions, three tools — and a server list that stays honest'),
+        ('2', AMBER, 'iperf_orchestrator', 'TCP bandwidth: the full-mesh stress test, its four modes, and a first-run tutorial'),
+        ('3', CRIM, 'matrix_orchestrator', 'packets per second: request/response load, reading the summary, scaling up'),
+        ('4', TEAL, 'netmesh', 'the idle baseline: latency, loss and path MTU — plus a five-minute tutorial'),
+        ('5', SLATE, 'Putting it together', 'a workflow for commissioning and troubleshooting a fabric'),
+    ]
+    rh = 0.92
+    for k, (n, c, t, d) in enumerate(rows):
+        ry = y + k * (rh + 0.14)
+        box(s, MARG, ry, CW, rh, FAINT)
+        chip = s.shapes.add_shape(MSO_SHAPE.OVAL, Inches(MARG + 0.22), Inches(ry + 0.23), Inches(0.46), Inches(0.46))
+        chip.fill.solid(); chip.fill.fore_color.rgb = c
+        chip.line.fill.background(); chip.shadow.inherit = False
+        ctf = chip.text_frame; cp = ctf.paragraphs[0]; cp.alignment = PP_ALIGN.CENTER
+        cr = cp.add_run(); cr.text = n
+        cr.font.size = Pt(15); cr.font.bold = True; cr.font.color.rgb = WHITE; cr.font.name = F
+        tf = txt(s, MARG + 0.95, ry + 0.13, 3.6, rh - 0.2)
+        p = tf.paragraphs[0]
+        r = p.add_run(); r.text = t
+        r.font.size = Pt(14.5); r.font.bold = True; r.font.color.rgb = INK
+        r.font.name = FM if '_' in t else F
+        tf2 = txt(s, MARG + 4.8, ry + 0.13, CW - 5.0, rh - 0.2)
+        p2 = tf2.paragraphs[0]; p2.line_spacing = 1.1
+        r2 = p2.add_run(); r2.text = d
+        r2.font.size = Pt(12); r2.font.color.rgb = MUTED; r2.font.name = F
+        tf2.word_wrap = True
+        tf2.paragraphs[0].alignment = PP_ALIGN.LEFT
+    return len(rows) * (rh + 0.14)
+
 DIAGRAMS = {'iperf-pair': diag_iperf_pair, 'reqreply': diag_reqreply,
-            'mesh': diag_mesh, 'heatmap': diag_heatmap}
+            'mesh': diag_mesh, 'heatmap': diag_heatmap,
+            'tool-cards': diag_tool_cards, 'agenda': diag_agenda}
 
 # ------------------------------------------------------------------- build
 sect_i = 0
@@ -463,12 +607,17 @@ for sl in slides:
         m = re.match(r'(Part \d+|Close)\s*(?:—\s*(.*))?', sl['title'])
         num = 'Part %d' % sect_i if sl['title'].lower().startswith('part') else ''
         title = sl['title'].split('—', 1)[-1].strip() if '—' in sl['title'] else sl['title']
-        label(s, MARG, 2.2, 6, num.upper() if num else 'WRAP-UP', 14, accent, align=PP_ALIGN.LEFT, bold=True)
-        tf = txt(s, MARG, 2.7, 8.6, 1.2)
+        label(s, MARG, 2.05, 6, num.upper() if num else 'WRAP-UP', 14, accent, align=PP_ALIGN.LEFT, bold=True, spaced=True)
+        tf = txt(s, MARG, 2.55, 8.6, 1.2)
         p = tf.paragraphs[0]
         r = p.add_run(); r.text = title
         r.font.size = Pt(40); r.font.bold = True; r.font.color.rgb = WHITE
         r.font.name = FM if '_' in title or title == 'netmesh' else F
+        if sl.get('sub'):
+            tfs = txt(s, MARG, 3.55, 8.2, 1.6)
+            ps = tfs.paragraphs[0]; ps.line_spacing = 1.2
+            rs = ps.add_run(); rs.text = sl['sub']
+            rs.font.size = Pt(15); rs.font.color.rgb = FOG; rs.font.name = F
         set_notes(s, sl['notes'])
         continue
 
@@ -477,7 +626,7 @@ for sl in slides:
     if sl['title'].lower().startswith('putting'):
         sect_name, accent = SECTS[4]
     s = new_slide()
-    label(s, MARG, 0.42, CW, sect_name, 10.5, accent, align=PP_ALIGN.LEFT, bold=True)
+    label(s, MARG, 0.42, CW, sect_name, 10.5, accent, align=PP_ALIGN.LEFT, bold=True, spaced=True)
     tf = txt(s, MARG, 0.68, CW, 0.62)
     p = tf.paragraphs[0]
     r = p.add_run(); r.text = sl['title']
@@ -501,6 +650,10 @@ for sl in slides:
             y += draw_table(s, b[1], MARG, y, CW, accent)
         elif b[0] == 'flow':
             y += draw_flow(s, b[1], MARG, y, CW, accent)
+        elif b[0] == 'cards':
+            y += draw_cards(s, b[1], MARG, y, CW, accent)
+        elif b[0] == 'panels':
+            y += draw_panels(s, b[1], MARG, y, CW, accent)
         elif b[0] == 'diagram':
             fn = DIAGRAMS.get(b[1])
             if fn:

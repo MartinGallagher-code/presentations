@@ -5,17 +5,21 @@ Slides are separated by `---`. Each slide has bullet content plus **Notes:** (wh
 
 ---
 
+### Slide: Agenda
+
+@@ agenda
+
+**Notes:** Five stops. The overview sets up the three questions and the reachable habit; then one section per tool, each ending in a hands-on tutorial you can reuse as a reference; and a closing workflow that ties them into a commissioning and troubleshooting routine.
+
+---
+
 ### Slide: Three questions, three tools
 
 Testing a fleet's network really means answering three different questions — each tool here answers one of them.
 
-| Tool | The question it answers | Network state | Cost to run |
-|---|---|---|---|
-| netmesh | Is the network healthy, and which link is sick? — RTT, jitter, loss, path MTU | **Idle** — the baseline | ~10 small pkts/s per pair; safe on production |
-| iperf_orchestrator | How much TCP bandwidth can every link carry, all at once? | **Fully loaded** | Line-rate flood — schedule a window |
-| matrix_orchestrator (mx) | How many packets/sec can the fleet exchange, when every packet is answered? | **Loaded at the rate you choose** | Tunable, gentle → torture |
+@@ tool-cards
 
-They're one family: the same servers.txt, the same ssh-only model, and grids that read the same way. And they measure different layers of the same fabric — a 9.4 Gbit/s result over a 300 µs path and one over a 42 ms path are *different results*.
+Same `servers.txt`, same ssh-only model — and different layers of the same fabric: a 9.4 Gbit/s result over a 300 µs path and one over a 42 ms path are *different results*.
 
 **Notes:** The frame for the whole talk. Bandwidth, packet rate and latency fail independently, so no single tool can tell you the network is fine. netmesh is cheap enough to run during an incident; iperf_orchestrator is the scheduled stress test; mx is the request/response rate test that looks like real RPC and storage traffic. Because they share one host-list grammar and one deployment model, learning one means you know how to drive all three.
 
@@ -23,10 +27,10 @@ They're one family: the same servers.txt, the same ssh-only model, and grids tha
 
 ### Slide: Why these tools
 
-- **They go anywhere you can ssh.** No agents, no daemons, no root — nothing installed on the servers, and `clean` removes every trace afterwards.
-- **The numbers are honest.** Blank never means zero, and the headline is what the *receiver* counted — not what the sender hoped. When a tool becomes its own bottleneck, it says so.
-- **They're one file each.** Stdlib-only Python — `pip install` it, or just scp the file and run it.
-- **Each stands alone.** Pick whichever answers today's question — no setup or ordering ties them together. They do share the same server-list format and the same verbs, so learning one means you can drive them all.
+:: They go anywhere you can ssh | No agents, no daemons, no root — nothing installed on the servers, and `clean` removes every trace afterwards.
+:: The numbers are honest | Blank never means zero, and the headline is what the *receiver* counted. When a tool becomes its own bottleneck, it says so.
+:: They're one file each | Stdlib-only Python — `pip install` it, or just scp the file and run it.
+:: Each stands alone | Pick whichever answers today's question. They share the same server-list format and verbs, so learning one means you can drive them all.
 
 **Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. Each tool is complete on its own — grab the one that matches the question in front of you. The shared conventions are a convenience, not a dependency: one servers.txt works everywhere, and the gen / start / status / summarize / stop / clean verbs mean the muscle memory transfers.
 
@@ -52,6 +56,8 @@ noicmp   # ICMP blocked here by policy   <- kept: ssh works
 ---
 
 ## Part 1 — iperf_orchestrator
+
+TCP bandwidth for the whole fleet: every link, both directions, loaded at once — and what the results actually mean.
 
 ---
 
@@ -240,6 +246,8 @@ iperf-orchestrator --servers servers.txt cleanup --yes   # tidy the servers
 
 ## Part 2 — matrix_orchestrator (`mx`)
 
+Packets per second, with every packet answered — request/response load the way real RPC and storage traffic behaves.
+
 ---
 
 ### Slide: The question iperf can't answer
@@ -255,12 +263,12 @@ iperf-orchestrator --servers servers.txt cleanup --yes   # tidy the servers
 
 ### Slide: What it does — and where it stops
 
-- **Does:** a paced request/response matrix between every pair — rate, sizes and port all in one editable file.
-- **Does:** honest accounting — the headline is what the *receivers* counted, and loss is split into the outbound leg and the return leg.
-- **Does:** true round-trip percentiles per flow, and it reports its **own CPU cost** right next to the network numbers.
-- **Doesn't:** TCP — that's iperf_orchestrator's job.
-- **Doesn't:** one-way delay — that would need synchronized clocks nobody has, so it refuses to fake it.
-- **Doesn't:** more than a few million packets/sec per host — beyond that you're in kernel-bypass territory. And when the tool itself becomes the limit, **it tells you so** rather than letting you blame the network.
+:+ A paced request/response matrix between every pair — rate, sizes and port in one editable file
+:+ Honest accounting — the headline is what the *receivers* counted; loss is split into outbound and return legs
+:+ True round-trip percentiles per flow — and it reports its **own CPU cost** next to the network numbers
+:- TCP — that's iperf_orchestrator's job
+:- One-way delay — that would need synchronized clocks nobody has, so it refuses to fake it
+:- More than a few Mpps per host — kernel-bypass territory. When the tool itself is the limit, **it says so**
 
 **Notes:** The theme is honesty: receiver-counted delivery, split loss, refusal to report numbers that can't be true, and self-awareness about its own ceiling. That last one matters most in practice — a load generator that silently saturates makes the network look guilty; this one names itself and names the fix (more workers, more streams, or more hosts).
 
@@ -402,6 +410,8 @@ mx clean                             # done -- delete every trace, verified
 
 ## Part 3 — netmesh
 
+The idle baseline: latency, loss and path MTU when nothing else is running — light enough for production, mid-incident.
+
 ---
 
 ### Slide: The baseline the load tests need
@@ -507,6 +517,8 @@ netmesh clean                          # managed runs: verified removal
 ---
 
 ## Close
+
+One server list, four tools, and a routine you can run on any fleet — plus the three habits that keep the numbers honest.
 
 ---
 
