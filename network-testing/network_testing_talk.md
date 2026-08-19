@@ -21,18 +21,14 @@ They're one family: the same servers.txt, the same ssh-only model, and grids tha
 
 ---
 
-### Slide: Why these tools — and how they fit together
+### Slide: Why these tools
 
 - **They go anywhere you can ssh.** No agents, no daemons, no root — nothing installed on the servers, and `clean` removes every trace afterwards.
 - **The numbers are honest.** Blank never means zero, and the headline is what the *receiver* counted — not what the sender hoped. When a tool becomes its own bottleneck, it says so.
 - **They're one file each.** Stdlib-only Python — `pip install` it, or just scp the file and run it.
-- **They compose** — meaning each one's output is the next one's input. `reachable` rewrites the very servers.txt the others read; netmesh and mx write matching N×N grids that open side by side in one spreadsheet. You chain them; there's no glue to write.
+- **Each stands alone.** Pick whichever answers today's question — no setup or ordering ties them together. They do share the same server-list format and the same verbs, so learning one means you can drive them all.
 
-=> reachable prod.txt -i | prune the list -> netmesh check | idle baseline -> iperf-orchestrator all | TCP under load -> mx run | pps under load -> netmesh --baseline | latency under load
-
-Commissioning a new fabric? Run them left to right — each answer tells you whether the next number will make sense.
-
-**Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. Spell out "they compose" plainly: one server list drives everything, and the outputs are designed to sit next to each other — pruning the list, baselining, then loading is a chain of commands, not three integrations. The pipeline on the slide is the whole talk in one line; the three big sections that follow just walk it left to right.
+**Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. Each tool is complete on its own — grab the one that matches the question in front of you. The shared conventions are a convenience, not a dependency: one servers.txt works everywhere, and the gen / start / status / summarize / stop / clean verbs mean the muscle memory transfers.
 
 ---
 
