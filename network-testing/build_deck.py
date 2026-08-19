@@ -124,7 +124,7 @@ for sl in slides:
         p1.font.size = Pt(20)
         p1.font.color.rgb = ACCENT
         p2 = stf.add_paragraph()
-        p2.text = 'with binnacle\u2019s reachable keeping the server list honest'
+        p2.text = 'and reachable, keeping the server list honest'
         p2.font.size = Pt(15)
         p2.font.italic = True
         p3 = stf.add_paragraph()
