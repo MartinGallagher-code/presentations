@@ -1,225 +1,300 @@
 # Network Testing at Fleet Scale
-### iperf_orchestrator · matrix_orchestrator (mx) · netmesh — with binnacle's `reachable` keeping the list honest
+### iperf_orchestrator · matrix_orchestrator · netmesh
 
 Slides are separated by `---`. Each slide has bullet content plus **Notes:** (what to say).
 
 ---
 
-## Part 0 — Overview
+### Slide: Agenda
+
+@@ agenda
+
+**Notes:** Five stops. The overview sets up the three questions and the reachable habit; then one section per tool, each ending in a hands-on tutorial you can reuse as a reference; and a closing workflow that ties them into a commissioning and troubleshooting routine.
 
 ---
 
-### Slide: Network testing with these tools
+### Slide: Three questions, three tools
 
-- Three questions about a fleet's network, three tools:
-  - **netmesh** (binnacle) — *what does the network do when idle?* RTT, jitter, loss, path MTU.
-  - **iperf_orchestrator** — *how much TCP bandwidth under load?* Full-mesh iperf2 throughput sweep.
-  - **matrix_orchestrator (`mx`)** — *how many packets per second, when every packet must be answered?* Request/response UDP matrix.
-- One family: same `servers.txt` grammar, same ssh-only model, N×N grid outputs that read the same way.
-- Plus **`reachable`** (binnacle): prunes dead entries from the server list so the run survives the servers that are down.
+Testing a fleet's network really means answering three different questions — each tool here answers one of them.
 
-**Notes:** Frame the talk: "is the network the problem?" answered at fleet scale over plain ssh. The three tools measure different layers of the same fabric; reachable is the hygiene step that makes any of them reliable on a real, decaying host list.
+@@ tool-cards
+
+Same `servers.txt`, same ssh-only model — and different layers of the same fabric: a 9.4 Gbit/s result over a 300 µs path and one over a 42 ms path are *different results*.
+
+**Notes:** The frame for the whole talk. Bandwidth, packet rate and latency fail independently, so no single tool can tell you the network is fine. netmesh is cheap enough to run during an incident; iperf_orchestrator is the scheduled stress test; mx is the request/response rate test that looks like real RPC and storage traffic. Because they share one host-list grammar and one deployment model, learning one means you know how to drive all three.
 
 ---
 
 ### Slide: Why these tools
 
-- **No agents, no daemons, no root** — plain Python/bash + ssh; nothing installed on servers.
-- **Leave no trace** — one remote directory; `clean` verifies it's actually gone before claiming success.
-- **Honest numbers** — blank means "not measured", never zero; DELIVERED (receiver-counted) outranks what was sent; causes outrank symptoms.
-- **One self-contained file each** — scp-able, stdlib-only; run from a checkout or `pip install`.
-- **Built for fleets** — capped parallel ssh fan-out, balanced load assignment, batched collection; patterns proven at N=100+.
-- **They compose** — shared list grammar; prune with `reachable`, baseline with `netmesh`, then load.
+:: They go anywhere you can ssh | No agents, no daemons, no root — nothing installed on the servers, and `clean` removes every trace afterwards.
+:: The numbers are honest | Blank never means zero, and the headline is what the *receiver* counted. When a tool becomes its own bottleneck, it says so.
+:: They're one file each | Stdlib-only Python — `pip install` it, or just scp the file and run it.
+:: Each stands alone | Pick whichever answers today's question. They share the same server-list format and verbs, so learning one means you can drive them all.
 
-**Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. The design rules (droppable onto any prod host, honest accounting, composability) run through all of them.
+**Notes:** The alternative is a week of hand-run iperf, ad-hoc pssh loops, and numbers nobody trusts. Each tool is complete on its own — grab the one that matches the question in front of you. The shared conventions are a convenience, not a dependency: one servers.txt works everywhere, and the gen / start / status / summarize / stop / clean verbs mean the muscle memory transfers.
 
 ---
 
-### Slide: The differences — what each is measuring
+### Slide: reachable — the run survives dead servers
 
-| Tool | Traffic | Headline number | Network state | Footprint |
-|---|---|---|---|---|
-| netmesh | UDP echo probes (agents both ends) | RTT p50/p99, jitter, loss split by leg, path MTU | **Idle** — the baseline | ~10 pkts/s/pair; safe during incidents |
-| iperf_orchestrator | TCP full-duplex (iperf2) | Mbps per direction per pair, + peak CPU | **Saturated** | Line-rate flood; schedule a window |
-| matrix_orchestrator | UDP request/response, paced | pps + Gbps wire, loss split, true RTT | **Loaded at the rate you choose** | Tunable, gentle → torture |
+- Server lists rot — and a fan-out that silently skips eleven dead hosts looks exactly like one that ran everywhere.
+- `reachable prod.txt -i` pings and ssh's every entry and comments out the failures, with the reason and date. When a host comes back, the next run uncomments it — and your own comments are never touched, so it's safe on cron.
+- **ssh is the gate, ping is the explanation**: a host that answers ssh is kept even when ICMP is blocked.
 
-**Notes:** Different layers fail independently: a fabric can carry 100 Gbit of bulk TCP and still collapse at 2 Mpps of answered packets. A 9.4 Gbit/s result at 300 µs idle RTT and one at 42 ms are *different results* — you need more than one of these numbers to know which you have.
+```
+web01
+# db07   #[unreachable] pings but ssh does not answer - 2026-08-15
+# ghost  #[unreachable] name does not resolve - 2026-08-15
+noicmp   # ICMP blocked here by policy   <- kept: ssh works
+```
 
----
+- Belt and braces: the orchestrators also fail open (`--keep-going`), so one dead box never aborts a 100-host run.
 
-### Slide: When to use which
-
-- **reachable** — before *any* fan-out, every time: prune the list so the run measures the fleet, not the list.
-- **netmesh** — "is it the network at all, and which link?" Incidents, new fabrics, before blaming anything. Prod-safe.
-- **iperf_orchestrator** — fabric acceptance & stress: "will it carry line rate? what breaks under full load?"
-- **mx** — RPC-shaped capacity: "how many answered packets/sec?" Small packets at rate is where fabrics and NICs actually fall over.
-- Commissioning a new fabric, run them in order: `reachable → netmesh → iperf_orchestrator → mx → netmesh under load`.
-
-**Notes:** Each tool's output tells you whether the next one's numbers make sense.
-
----
-
-### Slide: `reachable` — the run that survives dead servers
-
-- Server lists rot: decommissioned, renamed, rebuilt without your key. A fan-out that silently skips 11 of 200 hosts looks identical to one that had nothing to say about them.
-- `reachable prod.txt -i` pings + ssh's every entry and **comments out failures with the reason and date**; every other tool still reads the file.
-- **ssh is the gate, ping is the explanation** — a host answering ssh is kept even with ICMP blocked. Outcomes distinguished: `auth` / `refused` / `dns` / `no-route` / `timeout` / `down`.
-- Re-runs **uncomment hosts that come back** — the list converges instead of decaying; your own comments are never touched; safe on cron (exit 0/1/2).
-- Ranges (`node[01-24]`) expand; a mixed range is split so failures comment out individually.
-- Belt and braces: the orchestrators also **fail open** — per-host failures are tracked and reported, and iperf_orchestrator's `--keep-going` finishes the fleet past a bad host.
-
-**Notes:** This is the resilience story: prune first, and the tools tolerate whatever died since. `reachable prod.txt -i` before every big run.
+**Notes:** This answers "can the test still run when several servers are down?" — twice over. First, prune: reachable keeps the list true, distinguishes a key problem from a dead box (auth / refused / dns / no-route / timeout / down), and converges instead of decaying. Second, the tools themselves tolerate failures mid-run: per-host failures are reported and skipped, not fatal. reachable prod.txt -i before every big run is the habit to sell.
 
 ---
 
 ## Part 1 — iperf_orchestrator
 
+TCP bandwidth for the whole fleet: every link, both directions, loaded at once — and what the results actually mean.
+
 ---
 
-### Slide: What it is
+### Slide: What it is — and why you'd run it
 
-- A single self-contained bash script (with embedded Python) that runs a **full-mesh iperf2 throughput test** across a server list.
-- Samples per-host CPU during the run; parses everything into `iperf_results.csv`, `cpu_summary.csv`, `iperf_pivot.txt`, `iperf_heatmap.png`.
-- Built for **fabric stress testing**: load every link in both directions simultaneously, find what breaks or degrades. Also a one-off "is the network healthy" fleet survey.
-- Stateless: each run gets a timestamped `results/<run-id>/`; `results/latest` follows the newest.
-- `pip install iperf-orchestrator` (or run the script straight from a checkout).
+- Takes **iperf** — the standard tool for measuring how fast the network really is between two machines — and runs it between **every pair of servers in a fleet, at the same time**.
+- The point is to load the network as *efficiently as possible*: every link, both directions, simultaneously. Ten seconds of that answers the real question — **what can this fabric actually carry, and what breaks first?**
+- Why run it: accept a new fabric or a change window; find the slow links and slow hosts; get a quick "is the fleet's network healthy?" picture.
+- One command in → four artifacts out: results CSV · per-host CPU summary · pivot table · **heatmap**.
+- One self-contained script, driving everything over ssh — the servers need nothing but iperf itself. A dead host is reported and skipped, never fatal.
+- What it leaves to its siblings: latency and packet rate (that's netmesh and mx).
 
-**Notes:** One command in (`iperf-orchestrator --servers servers.txt all`), four artifacts out; the heatmap is the one you open first.
+**Notes:** Lead with the goal, not the implementation: a mesh of N hosts has N·(N−1)/2 pairs, and the only way to truly max out a fabric in a short window is to orchestrate all of them at once — that's the tool's whole reason to exist. Mention only in passing that it happens to be a single script; what matters is that servers need zero setup beyond iperf and an ssh key.
 
 ---
 
 ### Slide: What is iperf?
 
-- The standard throughput tool: a client opens a TCP connection to a server and pushes bytes as fast as it can for N seconds; the report is the achieved end-to-end bandwidth.
-- iperf2 and iperf3 are **different codebases**, not versions of each other.
-- The orchestrator uses iperf2's `--full-duplex`: both directions concurrently on a single TCP socket — one test per pair, and closer to what real traffic does to switch buffers.
+iperf is the de-facto standard throughput tool: it fills the pipe between two machines and reports what actually got through — the true end-to-end capacity of that path: NICs, kernel, cables, switches, everything in between.
 
-**Notes:** Quick grounding for anyone who hasn't used it. Set up the iperf2-vs-iperf3 story here.
+@@ iperf-pair
 
----
+| Knob | What it means |
+|---|---|
+| duration (`-t`) | how long the push lasts — 10 s default; longer smooths out bursts |
+| parallel streams (`-P`) | several TCP connections at once — one stream often can't fill a fat pipe |
+| full-duplex | both directions at the same time, on one connection — like real traffic |
+| TCP vs UDP | TCP measures achievable throughput; UDP sends a fixed rate to measure loss |
 
-### Slide: Why iperf2, not iperf3 (and why the orchestrator was necessary)
+Given enough CPU, iperf saturates a 1G / 10G / 25G link. But it thinks in **pairs** — it has no idea a fleet exists. That's the orchestrator's job.
 
-- iperf3's server is **single-threaded, one client at a time** — in a mesh, everyone else gets "server busy". Workaround at N=100: 100 daemons × 100 ports × 100× firewall holes per host. The first version used iperf3 and collapsed under its own workarounds.
-- iperf2's multi-threaded server takes concurrent clients on **one port (5001)** — one daemon per host, done.
-- Why an orchestrator at all — a mesh has quadratic moving parts:
-  - **4,950 pairs at N=100** — nobody runs that by hand.
-  - **Synchronized start**: compute `now + 30 s` once, push the epoch, every host busy-waits and fires within a fraction of a second. No locks, no protocol — just a number.
-  - **Balanced client assignment (parity rule)**: for pair {i, j}, client = smaller index if i+j even, larger if odd → every host runs 49–50 clients instead of 0–99. Both ends compute it independently.
-  - **Tar-batched collection**: one tar + scp + untar per host ≈ minutes, vs ~80 minutes of N² scp handshakes.
-  - **CPU sampled on every host** during the run — because a throughput number without CPU next to it gets misread.
-
-**Notes:** Each of these was a real problem hit and fixed; the tool is the accumulated answers. Mention `check-iperf` catches distros where `iperf` is secretly a symlink to iperf3 (`WRONG_VERSION`).
+**Notes:** Take a beat here for anyone who hasn't used iperf. The mental model: it answers "how fast is the pipe between A and B, really?" by filling it. Emphasize that the number includes the whole path — a slow result can be the NIC, the host's CPU, or the network, which is exactly why the orchestrator also samples CPU. The pair-at-a-time limitation is the segue to the next slide.
 
 ---
 
-### Slide: Why run it — and what it does / doesn't do
+### Slide: Why iperf2 — and why an orchestrator at all
 
-- **Why:** acceptance-test a new fabric or change window (load everything, see what breaks); rank slow hosts/links; get a defensible baseline picture of the fleet.
-- **Does:** full-duplex TCP mesh; synchronized start; balanced pairs; per-host CPU (mpstat, `/proc/stat` fallback); parse → CSV/pivot/heatmap re-runnable per run-id; capped ssh fan-out (`--jobs`), optional `--retries`; **fails open** — one bad host doesn't abort a 100-host run.
-- **Doesn't:**
-  - No UDP, no latency, no packet rate — that's netmesh/mx territory.
-  - Doesn't install iperf2 or distribute ssh keys — `doctor` / `check-iperf` verify, you provision.
-  - No normalization for mixed NIC speeds (1G hosts look red next to 10G).
-  - Heatmap past ~60 hosts drops cell labels by design; read the CSV for exact values.
-  - `sequential-pair` at N=100 ≈ 14 hours — the cleanest mode is priced accordingly.
+- Two iperfs exist: **iperf2** serves many clients on one port; **iperf3** takes one at a time — unusable in a mesh. iperf2's `--full-duplex` also tests both directions on one connection.
 
----
+@@ mesh
 
-### Slide: Setup needs
+| Making the mesh efficient | How |
+|---|---|
+| Everyone starts together | one "start at" timestamp pushed to all hosts — they fire within a fraction of a second |
+| Work is spread fairly | every host runs ~half the client jobs (49–50 each at N=100, not 0–99) |
+| Results come home fast | one archive per host, not thousands of copies — minutes instead of ~80 |
+| CPU sampled everywhere | a throughput number without CPU next to it gets misread |
 
-- **Orchestrator host:** bash 4+, ssh/scp, tar/gzip, Python 3.6+ (numpy + matplotlib only for the heatmap step).
-- **Every server:** iperf2 (binary named `iperf`, 2.0.13+ for `--full-duplex`); sysstat's `mpstat` recommended; key-based ssh from the orchestrator (BatchMode — a password prompt is a failure, not a prompt).
-- Keys first: `for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done`
-- Preflight: `doctor` (local deps + install hints), `check-iperf` (fleet), `check-servers` (what's already running).
+**Notes:** Each of these was a real problem hit and fixed — the tool is the accumulated answers. Worth a warning: some distros ship "iperf" as a symlink to iperf3; the check-iperf preflight catches that (WRONG_VERSION). The parity rule detail if asked: for pair {i, j}, the client is the smaller index when i+j is even, the larger when odd — both ends compute it independently, so no coordination is needed.
 
 ---
 
-### Slide: Running, collecting, interpreting, cleaning up
+### Slide: Running it, start to finish
 
-- Pipeline: `start-servers → run-tests → collect-results → parse-csv / parse-cpu / make-pivot / make-heatmap → stop-servers → cleanup --yes`
-- `all` runs the whole thing; every stage is a standalone subcommand, safe to re-run (`--run-id` addresses old runs; `results/latest` symlink).
-- **Interpreting:** start with `iperf_heatmap.png` and `results-summary` (P50/P95/min/mean/max + 5 slowest pairs).
-  - Rows = sender, columns = receiver. **All-red row → that host's outbound is sick; all-red column → sick inbound.** Bar chart ranks hosts by mean outgoing Mbps, with peak CPU% on each bar.
-  - **The classic misread:** slow host + `peak_total_pct` ≈ 100% ⇒ you measured the CPU, not the fabric. Second classic: box-wide CPU 30% but softirq pinned at 100% on core 0 ⇒ RSS isn't spreading NIC IRQs — invisible without per-core data (`mpstat -P ALL`).
-- **Cleanup:** `stop-servers` kills daemons; `cleanup --yes` removes the remote dir — scoped to the run-id, so parallel runs on a shared FS never collide. Died halfway? `all --resume`; flaky host? `all --keep-going`.
+```
+iperf-orchestrator --servers servers.txt all
+```
 
----
+=> start-servers | iperf comes up everywhere -> run-tests | the synchronized mesh -> collect-results | logs come home -> process | CSV, pivot, heatmap -> stop + cleanup | leave no trace
 
-### Slide: Different ways to run
+- Every run lands in its own timestamped folder — `results/<run-id>/`, with `results/latest` pointing at the newest. Old runs can be re-analyzed any time (`--run-id`).
+- **Reading a run, in order:** ① the heatmap — a red *row* means that server sends slowly to everyone; a red *column* means everyone struggles to reach it. ② the CPU summary — if a "slow" host's CPU was pegged, you measured the host, not the network. ③ `results-summary` — percentiles plus the five slowest pairs.
+- Useful switches: `--dry-run` (show what would run, run nothing) · `--keep-going` (finish past a dead host) · `--resume` (pick up an aborted run) · `--duration` / `-P` (longer or multi-stream tests). Every switch is also an environment variable.
 
-- One-liner: `iperf-orchestrator --servers servers.txt all` — everything else is refinement.
-- Every setting is both a flag and an env var (`--duration 60` ≡ `IPERF_DURATION=60`); flags win.
-- Scale: `--jobs 64` (ssh fan-out cap, setup/teardown only), `--retries N` (linear back-off), `-P` parallel streams, rolling's `--total-time` / `--flows`.
-- Trust: `--dry-run` prints every ssh/scp command; `--verbose` / `--quiet`; `status` probes hosts live.
-- Fit: `--run-id` for history; `REMOTE_DIR` safe on shared filesystems (files embed host + run-id); no hidden state anywhere.
+**Notes:** Keep this non-specialist: one command does the whole pipeline, and each box in the flow is also a standalone subcommand for day-2 work — re-render a heatmap, re-collect from one host, re-run just the analysis. The reading order matters more than any switch: heatmap for *where*, CPU for *whether to believe it*, summary for *how bad*. Narration extras if asked: collection is batched one archive per host, and the remote directory is safe on shared filesystems because every file embeds host + run-id.
 
 ---
 
-### Slide: Run modes — what they are, when to use them, why they exist
+### Slide: The four run modes
 
-| Mode | Concurrency | Wall-clock @ N=100, 10 s tests | Use it when |
+Every run answers "how fast?" — the **mode** decides *how much traffic shares the wire at once*. That one choice trades realism against isolation against wall-clock time.
+
+| Mode | On the wire at once | @ 100 hosts | In one line |
 |---|---|---|---|
-| `parallel` (default) | every host fires all clients after one synchronized start | ~50 s | **Stress**: load the whole fabric at once, see what breaks |
-| `sequential-host` | one host at a time runs all its clients | ~17 min | Clean per-host numbers without inter-host interference |
-| `sequential-pair` | exactly one connection on the wire | ~14 h | Cleanest per-pair numbers — usually overkill |
-| `rolling` | each host keeps testing its least-tested peer, ≤ `--flows` at once, for `--total-time` | bounded by `--total-time` | **Very large N**: per-host load constant regardless of fleet size |
+| `parallel` (default) | everything | ~1 min | the stress test — load it all, see what breaks |
+| `sequential-host` | one host's tests | ~17 min | what is each *server* capable of? |
+| `sequential-pair` | one connection | ~14 h | the microscope — cleanest possible pair numbers |
+| `rolling` | a few per host, continuously | you choose | fleets too big to mesh; long soaks |
 
-- **Why modes exist:** one knob — how much traffic shares the wire at once — trades realism vs isolation vs wall-clock. `parallel` answers "what breaks under load?"; sequential modes answer "what is each host/pair capable of?"; `rolling` exists because at huge N even the full-mesh schedule itself becomes the problem.
+**Notes:** Frame it as one dial, four positions. parallel is realism: everything contends, like a bad day in production. The sequential modes buy isolation with time. rolling gives up the synchronized snapshot entirely in exchange for a constant, gentle load that works at any fleet size. The next four slides take them one at a time.
 
-**Notes:** Pick by question: stress = parallel, capability = sequential-host, forensic = sequential-pair, huge fleet = rolling.
+---
+
+### Slide: parallel — the stress test (default)
+
+| | |
+|---|---|
+| What happens | after a synchronized start, every host fires all of its tests at once — the whole fabric is under full bidirectional load within a second |
+| When to use it | accepting a new fabric, validating a change window — "what breaks under full load?" |
+| How | `iperf-orchestrator --servers servers.txt all` |
+| Wall-clock | ~1 test duration, at any fleet size (~50 s at N=100) |
+| Reading the results | numbers below line rate are *normal* — every pair is sharing. Look for outliers: dark rows/columns, and hosts whose CPU pegged. Finds congestion and weak links; not any single pair's clean maximum |
+
+**Notes:** This is the mode the tool was built for and the one to demo. Set expectations about the numbers: under full contention a 10G host talking to 49 peers won't show 10G to each — you're reading the *distribution* and its outliers, not absolute line rate. If something looks bad here, the next two modes are how you isolate it.
+
+---
+
+### Slide: sequential-host — one server at a time
+
+| | |
+|---|---|
+| What happens | each host in turn runs all of its tests while every other host stays quiet |
+| When to use it | "what is this *server* capable of?" — the follow-up for a host that looked bad under parallel |
+| How | `iperf-orchestrator --servers servers.txt all sequential-host` |
+| Wall-clock | ~N × duration (~17 min at N=100) |
+| Reading the results | with the fabric to itself, each host should approach line rate. Still slow = a *local* problem (NIC, driver, CPU). Fine alone but bad in parallel = contention; bad in both = the host |
+
+**Notes:** The parallel/sequential-host comparison is the diagnostic one-two punch: the first finds the suspect, the second tells you whether it's the host or the fabric. This is also the mode for baselining what "good" looks like per host class before a stress run.
+
+---
+
+### Slide: sequential-pair — the microscope
+
+| | |
+|---|---|
+| What happens | exactly one connection on the wire at any moment, pair after pair |
+| When to use it | confirming a single suspect pair with the cleanest number possible — almost never a whole fleet |
+| How | `iperf-orchestrator --servers suspects.txt all sequential-pair` — list only the suspects |
+| Wall-clock | N(N−1)/2 × duration: ~14 h at N=100, a minute at N=4 |
+| Reading the results | as clean as pair numbers get. Still slow here = the *path itself* — hand it to `netmesh paths` to find the hop |
+
+**Notes:** The trap to warn about: running sequential-pair across a big fleet because it's "the accurate one". It is — and it's quadratic. The right use is surgical: three or four hosts you already suspect, cleanest numbers in minutes, then escalate to path-level tools if it's still slow.
+
+---
+
+### Slide: rolling — fleets too big to mesh
+
+| | |
+|---|---|
+| What happens | no grand schedule — each host keeps a couple of short tests running against its *least-tested* peer, for as long as you budget |
+| When to use it | very large fleets, where even the parallel mesh becomes the problem; long soak tests |
+| How | `iperf-orchestrator --total-time 1800 --flows 2 all rolling` |
+| Wall-clock | exactly the budget you give it; per-host load is constant at any fleet size |
+| Reading the results | a survey, not a snapshot — coverage evens out over time. Read percentiles and slowest pairs; give every pair a few visits |
+
+**Notes:** The contrast to land: parallel is one synchronized photograph of the fleet under maximum load; rolling is a long exposure at gentle, constant load. At 1,000 hosts a full mesh is half a million pairs — rolling is the only shape that stays sane there, and its per-host load being independent of fleet size is the property that makes it safe.
+
+---
+
+### Slide: Tutorial — your first run
+
+```
+# 0. install on the machine you'll drive from
+#    (servers need only iperf2 + your ssh key)
+pip install iperf-orchestrator
+
+# 1. list your servers, one per line
+printf '%s\n' 10.0.0.10 10.0.0.11 10.0.0.12 10.0.0.13 > servers.txt
+
+# 2. make key-based ssh work everywhere
+for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
+
+# 3. preflight: local deps, then iperf2 + mpstat on every host
+iperf-orchestrator doctor
+iperf-orchestrator --servers servers.txt check-iperf
+
+# 4. the whole pipeline, default (parallel) mode
+iperf-orchestrator --servers servers.txt all
+```
+
+- You'll watch the five stages run; per-host warnings are printed but don't stop the run. A few minutes later the results directory is announced.
+
+**Notes:** This and the next slide are the take-home reference. If demoing live, four small VMs are plenty. The two preflights catch ninety percent of first-run failures: missing local python packages, iperf secretly being iperf3, mpstat absent, or a host that still wants a password.
+
+---
+
+### Slide: Tutorial — reading it, and running it again
+
+```
+ls results/latest/                # iperf_results.csv  cpu_summary.csv
+                                  # iperf_pivot.txt    iperf_heatmap.png
+iperf-orchestrator results-summary          # P50/P95 + 5 slowest pairs
+
+iperf-orchestrator --duration 30 -P 4 all   # longer tests, 4 streams each
+iperf-orchestrator --run-id <id> make-heatmap        # re-render an old run
+iperf-orchestrator --servers servers.txt cleanup --yes   # tidy the servers
+```
+
+@@ heatmap
+
+- Every run is a timestamped folder: keep them, and diff results across change windows.
+
+**Notes:** The habits to leave the audience with: heatmap → CPU → summary, in that order; bump --duration and -P when a single 10-second stream can't fill the pipe (common on 25G+); and treat run folders as records — the before/after diff across a change window is often the most valuable artifact the tool produces.
 
 ---
 
 ## Part 2 — matrix_orchestrator (`mx`)
 
----
-
-### Slide: Purpose — beyond iperf_orchestrator
-
-- iperf_orchestrator gives each pair's **max TCP bandwidth**. Real traffic isn't bulk bytes — it's RPCs, storage reads, control planes: small requests, sized answers, measured in **packets**.
-- `mx` runs that shape: every host sends *x*-byte requests at a target rate to every peer; every request gets a *y*-byte reply. That's the whole model.
-- Headline: **packets per second the fleet can exchange when every packet must be answered** — where fabrics and NICs actually fall over.
-- **RTT falls out free**: the reply carries the request's timestamp back → true round trip, no clock sync.
-- Asymmetry by design: `--tx-size 128 --rx-size 8192` = RPC — equal pps both ways, 64× the bandwidth on the reply path. That asymmetry usually breaks first; the report keeps directions separate.
-- **Why UDP only:** "every x-byte request gets a y-byte reply" is a statement about packets; TCP would coalesce and re-segment → the pps number would be fiction. TCP goodput → iperf_orchestrator.
+Packets per second, with every packet answered — request/response load the way real RPC and storage traffic behaves.
 
 ---
 
-### Slide: What it does / doesn't do
+### Slide: The question iperf can't answer
 
-- **Does:** paced request/response matrix (rates, sizes, port all in one editable CSV); payload *and* wire rate (+66 B framing/packet — what the NIC actually carries); loss split forward/return; DELIVERED as the honest headline; RTT avg/p50/p99/max per flow; per-host CPU incl. the agent's own share; grids; `check`/`hints`/`doctor` preflight; fd soft-limits raised automatically.
-- **Doesn't / limits:**
-  - No TCP; no one-way delay (needs clock sync it refuses to pretend it has).
-  - Not a kernel-bypass blaster: ~**200k pps per worker** (one core), 1–4 Mpps per typical host; beyond a few Mpps the kernel UDP path is the wall as much as Python — wider fleet or AF_XDP/DPDK.
-  - Payload 32–65507 bytes; key-based ssh assumed (`mx doctor` checks).
-  - Won't hide its own limits: when a worker saturates, the summary **says you're measuring the tool** and names the fix.
+- iperf measured **bytes** per second. But most real traffic is *conversations* — RPCs, storage reads, control planes: a small request out, an answer back — and that stresses a network in **packets per second**, which is where fabrics and NICs actually fall over.
+- `mx` runs exactly that shape between every pair of hosts, at a rate you choose — and the asymmetry it creates (tiny requests, fat replies) is usually what breaks first.
+
+@@ reqreply
+
+**Notes:** Land the contrast with a picture in words: a fabric can move 100 gigabits of bulk TCP happily and still collapse at two million answered packets per second — and your database traffic looks like the second thing, not the first. If asked why UDP: TCP would quietly merge small packets together, so a "packets per second" number over TCP would be fiction. The two tools are two halves of the load story: iperf_orchestrator for bytes, mx for packets.
 
 ---
 
-### Slide: How to run it — different from iperf_orchestrator
+### Slide: What it does — and where it stops
+
+:+ A paced request/response matrix between every pair — rate, sizes and port in one editable file
+:+ Honest accounting — the headline is what the *receivers* counted; loss is split into outbound and return legs
+:+ True round-trip percentiles per flow — and it reports its **own CPU cost** next to the network numbers
+:- TCP — that's iperf_orchestrator's job
+:- One-way delay — that would need synchronized clocks nobody has, so it refuses to fake it
+:- More than a few Mpps per host — kernel-bypass territory. When the tool itself is the limit, **it says so**
+
+**Notes:** The theme is honesty: receiver-counted delivery, split loss, refusal to report numbers that can't be true, and self-awareness about its own ceiling. That last one matters most in practice — a load generator that silently saturates makes the network look guilty; this one names itself and names the fix (more workers, more streams, or more hosts).
+
+---
+
+### Slide: Six commands drive it
+
+| Command | What it does |
+|---|---|
+| `mx gen` | build the traffic matrix from your server list |
+| `mx start` | copy the agent everywhere and start it |
+| `mx status` | one live line per host — running, and how fast? |
+| `mx summarize` | collect reports → pps / loss / latency + *what to do next* |
+| `mx stop` | stop the agents — reports stay on the hosts |
+| `mx clean` | stop, delete every trace, and verify it's gone |
+
+`mx run --for 60` does the whole cycle in one shot. Servers need nothing but Python and your ssh key — no iperf, no packages, no root.
+
+**Notes:** Deliberately simpler than iperf_orchestrator: six verbs and one file. Also worth naming the helpers — mx doctor checks the fleet is ready, mx check asks "can the NICs even carry what you're about to request?", and mx hints turns a goal ("2 million packets per second per host") into the exact command.
+
+---
+
+### Slide: One file describes the traffic — edit it, even mid-run
 
 ```
-printf '%s\n' 10.0.0.10 10.0.0.11 10.0.0.12 > servers.txt
-mx gen --servers servers.txt --pps 20000   # 1. build matrix.csv
-mx start                                   # 2. deploy + run everywhere
-mx status                                  # 3. running? how fast?
-mx summarize                               # 4. pps / Gbps / loss / latency
-mx stop                                    # 5. stop the agents
-mx clean                                   # 6. leave no trace
-# or all of it: mx run --for 60
-```
-
-- Differences from iperf_orchestrator: servers need **nothing but Python 3.6+** (no iperf2 to install); config lives in `matrix.csv`, not flags you re-type; pure-Python single file, stdlib only.
-- Five more when needed: `run`, `check` (will the NICs carry this?), `hints` (goal → command), `logs`, `doctor`.
-- Every fleet command: `--user --jobs --remote-dir --python --dry-run` (+ `MX_*` env vars).
-
----
-
-### Slide: The matrix file — and changing the run mid-stream
-
-```
-# mx matrix v1 -- rows send, columns receive, cells are packets/sec
+# rows send, columns receive, cells are packets/sec
 # tx_size=64 rx_size=512 port=5300
 src\dst,10.0.0.10,10.0.0.11,10.0.0.12
 10.0.0.10,,20000,20000
@@ -227,161 +302,235 @@ src\dst,10.0.0.10,10.0.0.11,10.0.0.12
 10.0.0.12,20000,20000,
 ```
 
-- Everything about the traffic lives here; no command needs the flags again. Host tokens: `name[=addr[:port]]`.
-- **Mid-stream = edit + `mx start` again** (agents redeploy in seconds):
-  - blank a cell → that flow is gone
-  - change a cell → that pair gets its own rate
-  - write `max` → that pair runs unpaced
-  - edit the header → reshape sizes / port
-- Non-uniform investigations ("only cross-rack pairs", "one hot pair unpaced") are text edits, not new features.
+- Everything about the traffic lives in `matrix.csv` — no flags to remember or re-type.
+- Want to change a running test? **Edit the file, `mx start` again.** Blank a cell to silence a pair · raise a cell to make a hot pair · write `max` to run one pair unpaced · edit the header to reshape every packet.
+- "What if only the cross-rack pairs run?" is a thirty-second text edit, not a feature request.
+
+**Notes:** This is the tool's real interface, and the mid-stream story: investigations are edits. Agents redeploy in seconds and reports keep accumulating, so iterating on the traffic shape mid-session is normal, not exceptional.
 
 ---
 
-### Slide: Getting results
-
-- `mx status --watch 5` — live ticker, one line per host.
-- `mx summarize` — fleet totals, per-host table (worst delivery first), worst flows, and a computed **WHAT TO DO NEXT**.
-- `mx summarize --grid g` — N×N CSVs in the matrix's shape: `pps`, `delivered`, `loss`, `rtt_p99`. **Dark row = sick sender; dark column = sick receiver; dark block = congested pair of leaves.**
-- `reports/<host>.csv` — one row per flow per interval (pps, loss, RTT percentiles, CPU, workers). Plain CSV; plot with anything.
-- `mx logs` for the agents' own logs. Reports survive `mx stop`; only `mx clean` removes them.
-
----
-
-### Slide: Interpreting the summary
+### Slide: Reading the summary
 
 ```
-REQUESTS   2.640 Mpps   2.75 Gbps wire
-DELIVERED  2.601 Mpps   98.52% of what was sent
-REPLIES    2.598 Mpps   2.71 Gbps wire
-TARGET     2.640 Mpps   100.0% achieved
-LOSS       1.59% round trip (1.48% forward, 0.11% back)
-RTT        avg 240us; worst flow p50 190us p99 4.1ms max 31ms
+REQUESTS    2.640 Mpps        what the senders put on the wire
+DELIVERED   2.601 Mpps        what the receivers actually counted
+LOSS        1.59% round trip  (1.48% outbound, 0.11% coming back)
+RTT         avg 240us         worst flow p99 4.1ms
 ```
 
-- **DELIVERED is the honest number** — senders can't see their own drops.
-- **Loss split by leg** — dropping 64 B requests vs dropping 8 KB replies need different fixes.
-- **RTT is a true round trip** — the stamp comes back; no clock sync involved.
-- Per-host CPU columns: `cpu` (box) / `1 core` (busiest core) / **`agent`** (busiest worker as share of one core). **`agent` ≈ 100% ⇒ you're measuring the tool, not the network** — add workers (spare cores) or hosts; the summary says so in as many words.
-- Performance model: ~200k pps × workers × hosts. Processes, not threads (GIL: 4 threads = 57k pps; 4 processes = 1.09M). One core pegged while the box idles? Workers can't outnumber flows → `--streams N` gives each pair N sockets (rate **split**, not multiplied) so workers/RSS/ECMP have tuples to spread: `mx start --streams 8 --workers 32`.
+- **DELIVERED is the headline** — a sender can't see its own drops.
+- **Loss is split by direction** — dropping tiny requests and dropping big replies point at different problems.
+- The summary ends with **WHAT TO DO NEXT** — it reads its own numbers and names the knob they point at.
+- Watch the **agent** CPU column: near 100% means the tool is the bottleneck, not your network — add workers (`--workers`), spread with `--streams`, or add hosts. The summary says this in as many words.
+- `mx summarize --grid g` writes N×N grids: a dark **row** is a sick sender, a dark **column** a sick receiver — read exactly like the iperf heatmap.
+
+**Notes:** Rule of thumb for the room: believe what arrived, not what was sent — then check whether the tool itself was working too hard before blaming the fabric. The performance model in one breath: roughly 200k packets/sec per worker process per core, times workers, times hosts; mx hints does that arithmetic for you.
 
 ---
 
-### Slide: Finding the limit — and common options
+### Slide: Finding the fleet's limit
 
-- `mx check --nic-gbps 25 --nic-mpps 15` first — was what you asked for even possible?
-- Ramp: `--pps 50000` → run → `--pps 100000` → … The last rate that delivers cleanly is the fleet's sustainable all-to-all packet rate.
-- Watch **in order**: (1) p99 lifting off the p50 — queues filling, usually before loss; (2) DELIVERED falling behind REQUESTS — something's dropping.
-- `--pps max` = unpaced: finds the ceiling fastest, tells you less about where it is.
-- Common shapes: `--tx-size 64 --rx-size 64 --pps max` (small-packet torture) · `--tx-size 128 --rx-size 8192` (RPC) · `--gbps 10 --tx-size 1400` (bandwidth-budget sizing) · `mx start --bind eth1` (data-NIC pinning — retargets peers' addresses too, both halves of the two-NIC job).
+```
+mx check --nic-gbps 25            # was what you're asking even possible?
+mx gen --servers s.txt --pps 50000  && mx run --for 120
+mx gen --servers s.txt --pps 100000 && mx run --for 120
+...                               # raise until delivery stops keeping up
+```
 
----
+- The last rate that delivers cleanly **is** the fleet's sustainable packet rate.
+- Two warning signs, in the order they appear: ① **p99 latency lifts away from the median** — queues are filling; ② **DELIVERED falls behind REQUESTS** — something is now dropping.
+- In a hurry? `--pps max` sends unpaced and finds the ceiling fastest — but tells you less about where the comfortable limit is.
 
-### Slide: Ways to run at different scales — getting the best run
-
-- **Small fleet (≤ ~30): full mesh** (default `gen`). Every pair, continuously — the forensic shape. Big box, few peers? add `--streams`.
-- **Large fleet: `--peers K`** — k-regular shuffle: each host talks to exactly K shuffled peers. Equal per-host load **by construction** (K superimposed permutations), K sockets instead of N−1, seeded + replayable (`--seed`). `--streams S` multiplies 4-tuples for ECMP coverage; a host holds K×S sockets.
-- **Full pair coverage at huge N: `--peers K --dwell T`** — layered rotation: the N−1 shifts of the shuffle are dealt out K at a time into ⌈(N−1)/K⌉ edge-disjoint layers; agents switch layers on their own wall clock (no control channel). After one cycle **every ordered pair measured exactly once**; per-host load never changes. 1000 hosts: full coverage every ~6 min on 8 sockets (`--dwell 3 --interval 1`). `--equal-layers` for dip-free soaks; COVERAGE section + `coverage_grid.csv` report progress.
-- Dwell floor: whole multiple of `--interval`; useful floor ≈ 3× interval.
-- Don't want to remember this? **`mx hints --servers s.txt --pps-per-host N`** does the arithmetic and prints the command.
+**Notes:** Queues fill before packets drop, so latency is the early warning — that ordering is the one thing to remember from this slide. Run mx check first so you never spend an afternoon discovering you asked a 10G NIC for 25G of replies.
 
 ---
 
-### Slide: Stopping and cleaning up
+### Slide: Big fleets
 
-- Everything on a server lives in one directory (`/var/tmp/mx`; `--remote-dir` to change): agent, matrix, log, report. No package, no sysctl, no unit file.
-- `mx stop` — agents halt; **reports and logs stay** for later collection.
-- Take `mx logs` and `mx summarize` first — then `mx clean`.
-- `mx clean` **refuses to report success** unless the directory is verifiably gone and no agent still runs.
-- Agents flush the current interval on SIGTERM — stopping doesn't discard the last seconds of data.
+- Small fleet? The default **full mesh** is perfect — every pair, all the time.
+- Big fleet? `--peers 8`: each host talks to exactly **8 shuffled peers** instead of all N−1. Every host still carries identical load, the whole fabric is still exercised — with 8 connections per host instead of hundreds.
+- Still need every pair checked? Add `--dwell 60`: the 8 peers **rotate on a schedule** until every pair has been measured — per-host load never changes, and no coordination traffic is needed.
+- Don't want to think about any of this? **`mx hints`** — tell it your goal, it prints the command.
+
+**Notes:** The intuition without the math: a random 8-peer assignment already spreads load evenly and crosses every layer of the fabric — the full mesh isn't needed for equal load, only for complete pair coverage, and the rotation buys that back at the same cost. A thousand-host fleet gets every-pair coverage every few minutes on eight sockets per host. The construction is seeded and replayable if anyone asks.
+
+---
+
+### Slide: Tutorial — your first mx run
+
+```
+# 0. install on the machine you drive from
+#    (servers need only python3 + your ssh key)
+pip install matrix-orchestrator
+
+# 1. servers, one per line
+printf '%s\n' 10.0.0.10 10.0.0.11 10.0.0.12 > servers.txt
+
+# 2. preflight the fleet: ssh, python, file-descriptor limits
+mx doctor
+
+# 3. describe the traffic: every pair, 20k requests/sec
+mx gen --servers servers.txt --pps 20000
+
+# 4. sanity-check it against the hardware
+mx check --nic-gbps 10
+
+# 5. run for 60 seconds: deploy, run, summarize, stop
+mx run --for 60
+```
+
+- The summary prints totals, the worst hosts and flows, and what to do next.
+
+**Notes:** Same shape as the iperf_orchestrator tutorial on purpose: list, preflight, one command. For a live demo three small VMs are enough — and mx selftest-style confidence comes from mx doctor plus a tiny --pps first run.
+
+---
+
+### Slide: Tutorial — watching, tuning, cleaning up
+
+```
+mx status --watch 5                  # live ticker while it runs
+mx summarize                         # anytime -- reports accumulate
+mx summarize --grid g                # N x N grids for a spreadsheet
+
+vi matrix.csv && mx start            # change the traffic mid-flight
+mx gen --servers servers.txt --pps 50000 && mx run --for 120   # ramp up
+
+mx logs                              # keep the agent logs
+mx stop                              # pause -- reports stay on hosts
+mx clean                             # done -- delete every trace, verified
+```
+
+- `stop` and `clean` are different on purpose: stop keeps the evidence, clean removes it and *proves* it's gone.
+- Everything on a server lives in one directory — no packages, no services, nothing to un-install.
+
+**Notes:** The workflow to model: run, summarize, edit the matrix, run again — an investigation loop measured in seconds. Collect logs and summaries before clean; after clean there is genuinely nothing left, which is the point.
 
 ---
 
 ## Part 3 — netmesh
 
----
-
-### Slide: What it is, and how it fits the grouping
-
-- One of binnacle's eight diagnostic tools (`pip install binnacle`); its question: **"is it the network, and which link is sick?"**
-- Measures RTT, jitter, loss and path MTU between machines **when nothing else is running** — the idle baseline.
-- The gap it fills: iperf_orchestrator = bandwidth under load; mx = pps under load. **Neither says what the network does idle — and that's the baseline both numbers must be read against.**
-- Deliberately the cheapest of the three: ~10 small packets/s per pair — safe on production during an incident.
-- Two hosts and one line is the design centre; mesh files, grids and layered scale-up exist but a two-box user never sees them.
-- Why run it: before blaming the network in an incident; before commissioning load tests; as a recurring health probe; and around a load test (`--baseline`) to see what the load does to latency.
+The idle baseline: latency, loss and path MTU when nothing else is running — light enough for production, mid-incident.
 
 ---
 
-### Slide: How it probes (why not ping)
+### Slide: The baseline the load tests need
 
-- **UDP echoes between temporary agents** — the only approach giving all four:
-  - **No root** — ordinary unprivileged UDP sockets both ends.
-  - **Exact RTT, one clock** — sender's own monotonic stamp echoed back untouched; no NTP assumptions.
-  - **Loss split into forward/return legs** — the responder independently counts what arrived. Not available from ping.
-  - **Measures the data plane** — ICMP is answered by router control planes (rate-limited, deprioritized), so it systematically lies about what application traffic sees.
-- **One-way delay deliberately not reported** — without PTP the clock offset would swamp the microseconds that matter. Instead: two separate round trips (A→B timed by A, B→A timed by B), compared — every number quoted is one that is actually true.
-- Can't deploy an agent (VIP, router, appliance)? Prefix with `~` → probed with ping, but **segregated as ONE-SIDED** in the report because those rows carry materially less.
+=> netmesh | IDLE: latency · loss · path MTU -> iperf-orchestrator | LOADED: TCP bandwidth -> mx | LOADED: packets per second
+
+- The load tools tell you what the fabric can *carry*. netmesh tells you what the fabric is *like* when nothing is running — and every loaded number has to be read against that baseline.
+- It measures **round-trip time, jitter, loss and path MTU** between your machines, using ~10 small packets per second per pair — light enough to run on **production, during an incident**.
+- Two hosts and one line is the whole experience: `netmesh check web01 db01`.
+
+**Notes:** The one-sentence pitch: a 9.4 gigabit result over a 300-microsecond path and the same result over a 42-millisecond path are different results — netmesh is how you know which one you have. It's also the tool to reach for first in an incident, because it's the only one of the three that's safe to point at production while users are on it.
 
 ---
 
-### Slide: How to run it
+### Slide: Why not just ping?
+
+- netmesh probes with **small UDP packets between two tiny agents** it places on your hosts — which buys four things ping can't do:
+
+| | ping | netmesh |
+|---|---|---|
+| Privileges | often needs root / special settings | none — ordinary sockets, ordinary user |
+| Latency | approximate | exact — the sender's own clock stamp comes back in the echo |
+| Loss | one number, no direction | split: *on the way there* vs *on the way back* |
+| Path measured | the router's management CPU — rate-limited, it lies | the same path your application traffic takes |
+
+- One-way delay is deliberately **not** reported: without synchronized clocks it would be a made-up number, and this tool doesn't report those.
+
+**Notes:** For endpoints you can't put an agent on — a VIP, a router, an appliance — prefix the host with ~ and it falls back to ping, but those rows are clearly quarantined in the report as one-sided, because they carry less truth. The theme continues: every number quoted is one that is actually true.
+
+---
+
+### Slide: Reading the report
+
+| Finding | How to read it |
+|---|---|
+| Headline | the *median* pair's latency — one sick pair can't drag it or hide in it; worst pairs listed below |
+| Asymmetry | A→B slow, B→A fine → look at A's *sending* side: the return trip proved the rest of the path |
+| MTU black hole | small packets pass, big ones silently vanish — "small requests work, large transfers hang" |
+| Path spread | one stream 29× slower than its siblings = a sick member inside a LAG/ECMP bundle |
+| Under load | what the load *did* to latency: p99 210 µs idle → 42 ms loaded is what everyone else paid |
+
+- And a clean run says so in plain words: **"the network is not your problem."**
+
+**Notes:** Every diagnosis is computed from the data, not canned: slow pairs sharing a source point at that host's egress; sharing a destination, its ingress; crossing a rack boundary, the path between. The under-load section is the bridge back to the other two tools — wrap netmesh around an iperf or mx run and the latency cost of the throughput number appears in the same report.
+
+---
+
+### Slide: Following up on what it finds
+
+- **A sick pair?** `netmesh paths --compare web03:db01 web01:db01` — prints the two routes side by side and marks the **first hop where they differ**. That hop is where to look.
+- **A clean baseline?** Then the network isn't your problem — go load it: `iperf-orchestrator all`, `mx run`.
+- **A host that's still slow?** Check the box itself before blaming the network again.
+- Cleanup is automatic for `check` (it removes everything it deployed); for managed runs, `stop` keeps the reports and `clean` verifiably removes every trace.
+
+**Notes:** The comparison trick in paths --compare is the practical gem: a sick route diffed against a healthy one turns "somewhere in the fabric" into "this hop". And the report itself tells you when to stop debugging the network — a clean baseline pointing you at the load tools closes the loop of the talk.
+
+---
+
+### Slide: Tutorial — netmesh in five minutes
 
 ```
-netmesh selftest                        # prove it works here first (loopback, no ssh)
-netmesh check web01 db01                # one-shot: gen, deploy, probe, summarize, clean
-netmesh check web01 db01 --for 60
-netmesh gen --servers prod.txt          # mesh file for repeat runs
-netmesh run --for 300 --grid grids/
-netmesh check web03 db01 --flows 8      # sweep source ports across a LAG/ECMP bundle
-netmesh run --baseline 20 -- ./iperf_orchestrator.sh all   # idle first, then probe under load
+# 0. prove the machinery works -- loopback only, no ssh needed
+netmesh selftest
+
+# 1. the two-host check: deploy, probe, report, clean up
+netmesh check web01 db01
+netmesh check web01 db01 --for 60      # a longer look
+
+# 2. hunting a fault that comes and goes: sweep the paths
+#    inside a LAG/ECMP bundle
+netmesh check web03 db01 --flows 8
 ```
 
-- Same verb set as mx (`gen/start/status/summarize/stop/clean` + `run/collect/logs/paths/doctor`); the mesh file shares mx's matrix grammar — learn one, know the other.
-- **`--flows N` matters:** one source port = one 5-tuple = one path through a LAG/ECMP bundle — a sick member is hit or missed by luck (the fault that never reproduces). N buckets split the rate (never multiply it) and are compared against the **median** bucket: "port 40008 sees p50 4.1 ms where the median flow sees 142 µs — same pair, same instant, so what differs is the bundle member."
-- IPv6: refused by netmesh (the rest of binnacle's list grammar supports it).
+- `check` leaves nothing behind — it deploys its agents, probes, prints the report and cleans up after itself.
+- The report ends with *what to do next*, including "the network is not your problem" when that's the truth.
+
+**Notes:** selftest first is the confidence builder — two agents over loopback, no second machine, no privileges. Then the two-host check is genuinely the whole experience for most users; --flows is the flag to remember when a fault reproduces only sometimes, because which bundle member you hash onto is luck until you sweep.
 
 ---
 
-### Slide: Getting reports & interpreting
+### Slide: Tutorial — repeat runs and load testing
 
-- `reports/<host>.csv` — tidy long format, one row per peer per direction per interval. **Blank means "not measured", never zero.** `--grid DIR` writes `rtt_p50/rtt_p99/jitter/loss/mtu/asym` grids matching mx's layout.
-- Headline = **median of pair p50s** (one sick pair can't move it or hide inside it); worst pairs ranked by p99.
-- **ASYMMETRY** — A→B 8× slower than B→A ⇒ look at A's egress; the return path just proved itself fine. Diagnosis is computed, not canned: slow pairs sharing a source → that host's egress; sharing a destination → its ingress; spanning a group boundary → the path between.
-- **PATH MTU** — four outcomes: confirmed / **blackhole** (small packets echo, large vanish, no error returns — "small requests work, large transfers hang") / cached / unsupported. Found without root; only an end-to-end echo counts.
-- **PATH SPREAD** (`--flows`) — one bucket 28.9× the median = a sick LAG/ECMP member, named while the run is fresh.
-- **UNDER LOAD** (`--baseline`) — p99 210 µs idle → 42 ms loaded: the queue in front of the bottleneck; what everything sharing the path paid for the throughput number. Loss appearing only under load gets its own finding.
-- Measurement honesty: flags when a NIC's `rx-usecs` coalescing timer is the floor you measured (with the `ethtool` line); `agent_cpu_pct` ≈ 100 ⇒ you're measuring the tool.
-- **A clean run says so plainly** — "the network is not your problem" — and points at mx / iperf_orchestrator for the load question.
+```
+# a standing mesh you can re-run
+netmesh gen --servers prod.txt
+netmesh run --for 300 --grid grids/    # 5 minutes + N x N grids
 
----
+# measure what a load test does to latency:
+# 20 s idle baseline, then keep probing while the load runs
+netmesh run --baseline 20 -- ./iperf_orchestrator.sh all
 
-### Slide: Stopping, cleaning up, following up
+# a sick pair? find the hop where its route diverges
+netmesh paths --compare web03:db01 web01:db01
 
-- `check` cleans up after itself — the two-host case never leaves anything behind. Managed runs: `stop` keeps reports; `clean` stops and removes every trace. No package, no daemon, no dotdir, no sysctl — ever. Agents flush on SIGTERM.
-- Reports replay: `summarize --reports ./reports`, even re-split around a load window after the fact (`--load-split <ts>`).
-- **Following up on findings:**
-  - Sick pair → `netmesh paths --compare web03:db01 web01:db01` — hop lists side by side, **first divergent hop marked**. That hop is where to look.
-  - Grids drop into the same spreadsheet as mx's — line up idle RTT against loaded loss, pair by pair.
-  - Clean baseline → the network isn't the problem: go load it (`mx run --for 60`, `iperf-orchestrator all`).
-  - Host still slow → binnacle's `why-slow` checks the box before you blame the network again.
+netmesh clean                          # managed runs: verified removal
+```
+
+- Same verbs as mx (`gen / start / status / summarize / stop / clean`) and the same grid format — learn one, know both.
+- In every report, **blank means "not measured" — never zero.**
+
+**Notes:** The --baseline wrapper is the closing move of the whole talk: baseline, then load, one report showing both. Grids land next to mx's grids in the same spreadsheet. And the honesty rule one last time — a pair that stopped answering writes blanks, because averaging zeros in would flatter the baseline, and a baseline tool must never flatter.
 
 ---
 
 ## Close
 
+One server list, four tools, and a routine you can run on any fleet — plus the three habits that keep the numbers honest.
+
 ---
 
 ### Slide: Putting it together
 
-```
-reachable prod.txt -i                       # prune -- the run survives the dead
-netmesh check ...                           # idle baseline: is the fabric healthy?
-iperf-orchestrator --servers prod.txt all   # TCP bandwidth: what breaks under load?
-mx run --for 300                            # answered packets/sec: the RPC ceiling
-netmesh run --baseline 20 -- <load>         # what the load did to latency
-```
+=> reachable | keep the list real -> netmesh | idle baseline -> iperf-orchestrator | TCP bandwidth -> mx | packets per second -> netmesh --baseline | latency under load
 
-- **Baseline before load** — a throughput number without its idle RTT is half a result.
-- **Trust what arrived, not what was sent** — and watch the CPU, or you're measuring the tool.
-- **Keep the list real** — `reachable` is why the whole pipeline still runs when servers are down.
-- All pip-installable: `iperf-orchestrator`, `matrix-orchestrator`, `binnacle`.
+- **1 · Start with the list** — `reachable prod.txt -i` comments out dead servers, so every later step measures the fleet, not the list.
+- **2 · Baseline while idle** — `netmesh check` gives the latency, loss and MTU numbers every later result is read against. Safe on production.
+- **3 · Load it with bytes** — `iperf-orchestrator all` floods every link both ways: the bandwidth ceiling, and the first look at what breaks.
+- **4 · Load it with packets** — `mx run` finds the answered-packets-per-second ceiling: the shape of real RPC and storage traffic.
+- **5 · Measure the cost** — wrap netmesh around a load run to see what the load did to latency for everyone else on the path.
+- Three habits: **baseline before load** · **trust what arrived, not what was sent** · **keep the list real**.
 
+**Notes:** Walk the flow left to right, one sentence per box — it's the whole talk replayed in thirty seconds. Each stage's answer is the context for the next: a pruned list makes the baseline trustworthy, the baseline makes the load numbers readable, and the two load ceilings — bytes and packets — bracket what the fabric can really do. The last box closes the loop: throughput always has a latency price, and measuring it is one wrapper command. Everything installs with pip; netmesh and reachable ship together in one package alongside the two orchestrators.
