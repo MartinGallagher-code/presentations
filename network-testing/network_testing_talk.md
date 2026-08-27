@@ -110,19 +110,35 @@ Given enough CPU, iperf saturates a 1G / 10G / 25G link. But it thinks in **pair
 
 ---
 
-### Slide: Running it, start to finish
+### Slide: One plan file — the same editing model as mx
 
 ```
-iperf-orchestrator --servers servers.txt all
+# iperf-orchestrator plan v1 -- one file drives every command
+# mode=parallel
+# port=5001 duration=10 streams=1 host_flows=1
+10.0.0.10
+10.0.0.11
+10.0.0.12
 ```
 
-=> start-servers | iperf comes up everywhere -> run-tests | the synchronized mesh -> collect-results | logs come home -> process | CSV, pivot, heatmap -> stop + cleanup | leave no trace
+- `gen` writes `iperf_plan.conf` — the host list plus every setting, in one file that every later command reads. No flag repeated, and a run is reproducible from one artifact. Precedence: CLI flag > env var > plan > default.
+- **Partial mesh, mx-style:** `gen --grid` writes the hosts as a `src\dst` pair grid — rows send, columns receive, and **blanking a cell skips that direction**. Every mode honors it, and re-running `gen` keeps your blanked cells.
+- Learned `matrix.csv`? You already know this file.
 
-- Every run lands in its own timestamped folder — `results/<run-id>/`, with `results/latest` pointing at the newest. Old runs can be re-analyzed any time (`--run-id`).
-- **Reading a run, in order:** ① the heatmap — a red *row* means that server sends slowly to everyone; a red *column* means everyone struggles to reach it. ② the CPU summary — if a "slow" host's CPU was pegged, you measured the host, not the network. ③ `results-summary` — percentiles plus the five slowest pairs.
-- Useful switches: `--dry-run` (show what would run, run nothing) · `--keep-going` (finish past a dead host) · `--resume` (pick up an aborted run) · `--duration` / `-P` (longer or multi-stream tests). Every switch is also an environment variable.
+**Notes:** This mirrors mx's matrix.csv deliberately: one artifact carries the whole run, and investigations are text edits. Blank cells to exclude a rack from sending, keep a receive-only host (its CPU sampler still runs), and hand the plan file to a colleague as the complete description of the test. A plain servers.txt still works everywhere and simply means full mesh.
 
-**Notes:** Keep this non-specialist: one command does the whole pipeline, and each box in the flow is also a standalone subcommand for day-2 work — re-render a heatmap, re-collect from one host, re-run just the analysis. The reading order matters more than any switch: heatmap for *where*, CPU for *whether to believe it*, summary for *how bad*. Narration extras if asked: collection is batched one archive per host, and the remote directory is safe on shared filesystems because every file embeds host + run-id.
+---
+
+### Slide: Running it — the same six verbs as mx
+
+=> gen | write the plan -> start | daemons + tests -> status --watch | live progress -> summarize | CSV · pivot · heatmap -> stop / clean | verified removal
+
+- **`run` does the whole cycle in one shot**, and `run --for N` pins the duration. The classic one-liner (`--servers servers.txt all`) and every step command still work underneath.
+- Every run lands in its own timestamped `results/<run-id>/` folder; `results/latest` points at the newest, and any old run re-analyzes with `--run-id`.
+- **Reading a run, in order:** ① the heatmap ② the CPU summary ③ `summarize` — which now ends with *what-to-do-next* hints: slow outliers, a uniform mesh, and CPU-bound hosts are called out for you.
+- Useful switches: `--dry-run` (show, don't run) · `--keep-going` (finish past a dead host) · `--duration` / `--streams` (longer, fatter tests). Everything is also an env var — and the plan file remembers the rest.
+
+**Notes:** The headline of the recent release: iperf_orchestrator now speaks the exact verb surface mx does — gen, start, status, summarize, stop, clean, plus run and hints — so driving one tool teaches you both. status gained a live per-host progress ticker (--watch, usable from a second terminal while the run blocks in the first), clean verifies removal like mx's, and summarize interprets its own numbers. The reading order still matters more than any switch: heatmap for where, CPU for whether to believe it, and the summary now closes the loop by naming the next command itself.
 
 ---
 
@@ -147,7 +163,7 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 |---|---|
 | What happens | after a synchronized start, every host fires all of its tests at once — the whole fabric is under full bidirectional load within a second |
 | When to use it | accepting a new fabric, validating a change window — "what breaks under full load?" |
-| How | `iperf-orchestrator --servers servers.txt all` |
+| How | `iperf-orchestrator gen --servers servers.txt && iperf-orchestrator run` |
 | Wall-clock | ~1 test duration, at any fleet size (~50 s at N=100) |
 | Reading the results | numbers below line rate are *normal* — every pair is sharing. Look for outliers: dark rows/columns, and hosts whose CPU pegged. Finds congestion and weak links; not any single pair's clean maximum |
 
@@ -161,7 +177,7 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 |---|---|
 | What happens | each host in turn runs all of its tests while every other host stays quiet |
 | When to use it | "what is this *server* capable of?" — the follow-up for a host that looked bad under parallel |
-| How | `iperf-orchestrator --servers servers.txt all sequential-host` |
+| How | `iperf-orchestrator run sequential-host` — the plan already knows the fleet |
 | Wall-clock | ~N × duration (~17 min at N=100) |
 | Reading the results | with the fabric to itself, each host should approach line rate. Still slow = a *local* problem (NIC, driver, CPU). Fine alone but bad in parallel = contention; bad in both = the host |
 
@@ -175,7 +191,7 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 |---|---|
 | What happens | exactly one connection on the wire at any moment, pair after pair |
 | When to use it | confirming a single suspect pair with the cleanest number possible — almost never a whole fleet |
-| How | `iperf-orchestrator --servers suspects.txt all sequential-pair` — list only the suspects |
+| How | `iperf-orchestrator gen --servers suspects.txt && iperf-orchestrator run sequential-pair` — a plan of just the suspects |
 | Wall-clock | N(N−1)/2 × duration: ~14 h at N=100, a minute at N=4 |
 | Reading the results | as clean as pair numbers get. Still slow here = the *path itself* — hand it to `netmesh paths` to find the hop |
 
@@ -189,7 +205,7 @@ Every run answers "how fast?" — the **mode** decides *how much traffic shares 
 |---|---|
 | What happens | no grand schedule — each host keeps a couple of short tests running against its *least-tested* peer, for as long as you budget |
 | When to use it | very large fleets, where even the parallel mesh becomes the problem; long soak tests |
-| How | `iperf-orchestrator --total-time 1800 --flows 2 all rolling` |
+| How | `iperf-orchestrator run rolling --for 1800` — `--for` pins the wall-clock; `--host-flows` sets per-host concurrency |
 | Wall-clock | exactly the budget you give it; per-host load is constant at any fleet size |
 | Reading the results | a survey, not a snapshot — coverage evens out over time. Read percentiles and slowest pairs; give every pair a few visits |
 
@@ -210,37 +226,42 @@ printf '%s\n' 10.0.0.10 10.0.0.11 10.0.0.12 10.0.0.13 > servers.txt
 # 2. make key-based ssh work everywhere
 for h in $(grep -v '^#' servers.txt); do ssh-copy-id "$h"; done
 
-# 3. preflight: local deps, then iperf2 + mpstat on every host
-iperf-orchestrator doctor
-iperf-orchestrator --servers servers.txt check-iperf
+# 3. write the plan once: hosts + every setting in one file
+iperf-orchestrator gen --servers servers.txt
 
-# 4. the whole pipeline, default (parallel) mode
-iperf-orchestrator --servers servers.txt all
+# 4. preflight: local deps, then iperf2 + mpstat on every host
+iperf-orchestrator doctor
+iperf-orchestrator check-iperf
+
+# 5. the whole pipeline, default (parallel) mode
+iperf-orchestrator run
 ```
 
-- You'll watch the five stages run; per-host warnings are printed but don't stop the run. A few minutes later the results directory is announced.
+- Watch it live from a second terminal: `iperf-orchestrator status --watch 5` — one progress line per host (`RUNNING 7/22 tests`, `DONE`, `UNREACHABLE`).
 
-**Notes:** This and the next slide are the take-home reference. If demoing live, four small VMs are plenty. The two preflights catch ninety percent of first-run failures: missing local python packages, iperf secretly being iperf3, mpstat absent, or a host that still wants a password.
+**Notes:** This and the next slide are the take-home reference. gen means no later command needs a flag — run, status and summarize all read the plan. The two preflights still catch ninety percent of first-run failures: missing local python packages, iperf secretly being iperf3, mpstat absent, or a host that still wants a password. Not sure what to ask for at any point? iperf-orchestrator hints turns the question into the command.
 
 ---
 
 ### Slide: Tutorial — reading it, and running it again
 
 ```
-ls results/latest/                # iperf_results.csv  cpu_summary.csv
-                                  # iperf_pivot.txt    iperf_heatmap.png
-iperf-orchestrator results-summary          # P50/P95 + 5 slowest pairs
+iperf-orchestrator status --watch 5   # live per-host progress ticker
+iperf-orchestrator summarize          # collect + render + what to do next
+ls results/latest/                    # iperf_results.csv  cpu_summary.csv
+                                      # iperf_pivot.txt    iperf_heatmap.png
 
-iperf-orchestrator --duration 30 -P 4 all   # longer tests, 4 streams each
-iperf-orchestrator --run-id <id> make-heatmap        # re-render an old run
-iperf-orchestrator --servers servers.txt cleanup --yes   # tidy the servers
+iperf-orchestrator --duration 30 --streams 4 run    # longer, fatter tests
+iperf-orchestrator --run-id <id> make-heatmap       # re-render an old run
+iperf-orchestrator hints              # a goal -> the command that gets there
+iperf-orchestrator clean              # stop + verified removal, no trace
 ```
 
 @@ heatmap
 
 - Every run is a timestamped folder: keep them, and diff results across change windows.
 
-**Notes:** The habits to leave the audience with: heatmap → CPU → summary, in that order; bump --duration and -P when a single 10-second stream can't fill the pipe (common on 25G+); and treat run folders as records — the before/after diff across a change window is often the most valuable artifact the tool produces.
+**Notes:** The habits to leave the audience with: heatmap, then CPU, then the summary — which now names the next command itself (slow outlier → run sequential-pair; uniform mesh → raise --streams or --host-flows; CPU ≥ 85% → the host is suspect). Bump --duration and --streams when a single 10-second stream can't fill the pipe, common at 25G and up. And clean now verifies, exactly like mx's — no --yes, no leftovers.
 
 ---
 
@@ -285,9 +306,9 @@ Packets per second, with every packet answered — request/response load the way
 | `mx stop` | stop the agents — reports stay on the hosts |
 | `mx clean` | stop, delete every trace, and verify it's gone |
 
-`mx run --for 60` does the whole cycle in one shot. Servers need nothing but Python and your ssh key — no iperf, no packages, no root.
+`mx run --for 60` does the whole cycle in one shot. Servers need nothing but Python and your ssh key — no iperf, no packages, no root. And these six verbs are now the **same six** iperf_orchestrator speaks — learn one, drive both.
 
-**Notes:** Deliberately simpler than iperf_orchestrator: six verbs and one file. Also worth naming the helpers — mx doctor checks the fleet is ready, mx check asks "can the NICs even carry what you're about to request?", and mx hints turns a goal ("2 million packets per second per host") into the exact command.
+**Notes:** Six verbs and one file — and since its 2.1 release, iperf_orchestrator mirrors this exact surface (gen/start/status/summarize/stop/clean, run, hints), so the muscle memory transfers both ways. Also worth naming the helpers — mx doctor checks the fleet is ready, mx check asks "can the NICs even carry what you're about to request?", and mx hints turns a goal ("2 million packets per second per host") into the exact command.
 
 ---
 
@@ -528,7 +549,7 @@ One server list, four tools, and a routine you can run on any fleet — plus the
 
 - **1 · Start with the list** — `reachable prod.txt -i` comments out dead servers, so every later step measures the fleet, not the list.
 - **2 · Baseline while idle** — `netmesh check` gives the latency, loss and MTU numbers every later result is read against. Safe on production.
-- **3 · Load it with bytes** — `iperf-orchestrator all` floods every link both ways: the bandwidth ceiling, and the first look at what breaks.
+- **3 · Load it with bytes** — `iperf-orchestrator run` floods every link both ways: the bandwidth ceiling, and the first look at what breaks.
 - **4 · Load it with packets** — `mx run` finds the answered-packets-per-second ceiling: the shape of real RPC and storage traffic.
 - **5 · Measure the cost** — wrap netmesh around a load run to see what the load did to latency for everyone else on the path.
 - Three habits: **baseline before load** · **trust what arrived, not what was sent** · **keep the list real**.
